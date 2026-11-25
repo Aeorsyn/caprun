@@ -32,13 +32,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (idx >= params.count) {
         return;
     }
-    var x: f32 = f32((idx ^ params.seed) & 1023u) * 0.001 + 1.0;
-    let step: f32 = 1.00001;
-    let bias: f32 = 0.0001;
-    for (var i: u32 = 0u; i < 256u; i = i + 1u) {
-        x = fma(x, step, bias);
+    let iters = select(params._pad0, 256u, params._pad0 == 0u);
+    let base = f32((idx ^ params.seed) & 1023u) * 0.001 + 1.0;
+    var a = vec4<f32>(base, base + 0.1, base + 0.2, base + 0.3);
+    var b = vec4<f32>(base + 0.4, base + 0.5, base + 0.6, base + 0.7);
+    var c = vec4<f32>(base + 0.8, base + 0.9, base + 1.0, base + 1.1);
+    var d = vec4<f32>(base + 1.2, base + 1.3, base + 1.4, base + 1.5);
+    let s0 = vec4<f32>(0.99999, 0.99998, 0.99997, 0.99996);
+    let s1 = vec4<f32>(0.99995, 0.99994, 0.99993, 0.99992);
+    let b0 = vec4<f32>(0.00002, 0.00003, 0.00004, 0.00005);
+    let b1 = vec4<f32>(0.00006, 0.00007, 0.00008, 0.00009);
+    for (var i: u32 = 0u; i < iters; i = i + 1u) {
+        a = fma(a, s0, b0); b = fma(b, s1, b1);
+        c = fma(c, s0, b1); d = fma(d, s1, b0);
     }
-    out_buf[idx] = x;
+    let acc = a + b + c + d;
+    out_buf[idx] = (acc.x + acc.y + acc.z + acc.w) * 0.0625;
 }
 "#;
 
@@ -96,7 +105,7 @@ impl VulkanBroker {
         })
     }
 
-    pub fn dispatch(&self, elements: u32, seed: u32, warm: bool) -> Result<GpuResult> {
+    pub fn dispatch(&self, elements: u32, seed: u32, iters: u32, warm: bool) -> Result<GpuResult> {
         if elements == 0 || elements > 1_048_576 {
             bail!("GPU dispatch elements out of safe bounds (1..=1048576)");
         }
@@ -119,7 +128,7 @@ impl VulkanBroker {
         let params = GpuParams {
             seed,
             count: elements,
-            _pad0: 0,
+            _pad0: iters,
             _pad1: 0,
         };
         let uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -190,18 +199,19 @@ impl VulkanBroker {
     }
 }
 
-pub fn dispatch_vulkan_compute(elements: u32, seed: u32) -> Result<GpuResult> {
+pub fn dispatch_vulkan_compute(elements: u32, seed: u32, iters: u32) -> Result<GpuResult> {
     let broker = VulkanBroker::new()?;
-    broker.dispatch(elements, seed, false)
+    broker.dispatch(elements, seed, iters, false)
 }
 
 pub fn try_dispatch_via_daemon(
     sock_path: &Path,
     elements: u32,
     seed: u32,
+    iters: u32,
 ) -> Option<Result<GpuResult>> {
     let mut stream = UnixStream::connect(sock_path).ok()?;
-    if writeln!(stream, "{}:{}", elements, seed).is_err() {
+    if writeln!(stream, "{}:{}:{}", elements, seed, iters).is_err() {
         return None;
     }
     let _ = stream.flush();
@@ -252,7 +262,8 @@ pub fn serve_broker(sock_path: &Path) -> Result<()> {
                 let parts: Vec<&str> = line.trim().split(':').collect();
                 let elements: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let seed: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                match broker.dispatch(elements, seed, true) {
+                let iters: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
+                match broker.dispatch(elements, seed, iters, true) {
                     Ok(res) => {
                         let _ = writeln!(
                             stream,
@@ -268,5 +279,25 @@ pub fn serve_broker(sock_path: &Path) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+pub fn bench_gpu(sock_path: &Path, elements: u32, iters: u32, runs: usize) -> Result<()> {
+    let go = || match try_dispatch_via_daemon(sock_path, elements, 42, iters) {
+        Some(r) => r,
+        None => dispatch_vulkan_compute(elements, 42, iters),
+    };
+    let w = go()?;
+    let total_flops = (elements as f64) * (iters as f64) * 32.0;
+    let mode = if w.warm { "WARM DAEMON" } else { "cold inline" };
+    println!("[bench-gpu:{}] {} | {}x{} ({:.2} GFLOPs)", mode, w.adapter_name, elements, iters, total_flops / 1e9);
+    let mut best = 0.0f64;
+    for i in 1..=runs {
+        let r = go()?;
+        let gf = total_flops / (r.compute_us.max(1) as f64 * 1000.0);
+        best = best.max(gf);
+        println!("  run {}/{}: {:>7.2} ms | {:>7.1} GFLOPS ({:.3} TFLOPS) | cs={}", i, runs, r.compute_us as f64 / 1000.0, gf, gf / 1000.0, r.checksum);
+    }
+    println!("  -> Peak: {:.1} GFLOPS ({:.3} TFLOPS)", best, best / 1000.0);
     Ok(())
 }

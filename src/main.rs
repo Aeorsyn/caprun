@@ -43,6 +43,7 @@ enum Cmd {
     },
     /// Start the persistent warm Vulkan GPU capability daemon on ~/.cas/vulkan.sock
     Broker,
+    BenchGpu { #[arg(long, default_value_t = 262_144)] elements: u32, #[arg(long, default_value_t = 4096)] iters: u32, #[arg(long, default_value_t = 3)] runs: usize },
     /// Inspect recent versioned commits in the local semantic object graph
     Graph {
         #[arg(long, default_value_t = 15)]
@@ -235,9 +236,9 @@ fn cmd_run(
             }
             let elements: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             let gseed: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let res = match gpu::try_dispatch_via_daemon(&sock_path, elements, gseed) {
+            let res = match gpu::try_dispatch_via_daemon(&sock_path, elements, gseed, 256) {
                 Some(r) => r,
-                None => gpu::dispatch_vulkan_compute(elements, gseed),
+                None => gpu::dispatch_vulkan_compute(elements, gseed, 256),
             };
             match res {
                 Ok(r) => {
@@ -468,6 +469,7 @@ fn main() -> Result<()> {
             test_escape,
         } => cmd_run(hash, fuel, seed, caps, test_escape),
         Cmd::Broker => gpu::serve_broker(&cas_root()?.join("vulkan.sock")),
+        Cmd::BenchGpu { elements, iters, runs } => gpu::bench_gpu(&cas_root()?.join("vulkan.sock"), elements, iters, runs),
         Cmd::Graph { limit } => cmd_graph(limit),
         Cmd::Worker {
             fuel,
