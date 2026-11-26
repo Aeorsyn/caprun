@@ -32,7 +32,7 @@ enum Cmd {
         hash: String,
         #[arg(long, default_value_t = 500_000_000)]
         fuel: u64,
-        #[arg(long, default_value_t = 42)]
+        #[arg(long, default_value_t = 42, allow_hyphen_values = true)]
         seed: i32,
         /// Grant explicit hardware capabilities (e.g. --cap vulkan)
         #[arg(long = "cap")]
@@ -54,7 +54,7 @@ enum Cmd {
     Worker {
         #[arg(long)]
         fuel: u64,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         seed: i32,
         #[arg(long)]
         allow_vulkan: bool,
@@ -197,8 +197,7 @@ fn cmd_run(
     cmd.arg("worker")
         .arg("--fuel")
         .arg(fuel.to_string())
-        .arg("--seed")
-        .arg(seed.to_string());
+        .arg(format!("--seed={}", seed));
     if allow_vulkan {
         cmd.arg("--allow-vulkan");
     }
@@ -354,7 +353,9 @@ fn lock_down_worker() -> Result<()> {
     }
 
     // 2. Attempt unprivileged namespaces
-    let _ = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) };
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) } != 0 {
+        bail!("unshare(CLONE_NEWUSER|CLONE_NEWNET) failed: {}", std::io::Error::last_os_error());
+    }
 
     // 3. Landlock: zero filesystem access
     let abi = ABI::V4;
