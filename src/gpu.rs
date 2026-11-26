@@ -274,7 +274,7 @@ impl VulkanBroker {
         self.run_pipeline(pipe, elements, seed, iters, warm)
     }
 
-    pub fn dispatch_frame(&mut self, wgsl: &str, elements: u32, seed: u32, iters: u32) -> Result<(Vec<u8>, u128)> {
+    pub fn dispatch_frame(&mut self, wgsl: &str, elements: u32, seed: u32, iters: u32, cam: u32) -> Result<(Vec<u8>, u128)> {
         if elements == 0 || elements > 1_048_576 { bail!("elements out of bounds"); }
         let key = blake3::hash(wgsl.as_bytes()).to_hex().to_string();
         if !self.custom_pipelines.contains_key(&key) {
@@ -292,7 +292,7 @@ impl VulkanBroker {
             label: None, size: byte_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
         });
-        let params = GpuParams { seed, count: elements, iters, _pad: 0 };
+        let params = GpuParams { seed, count: elements, iters, _pad: cam };
         let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None, size: std::mem::size_of::<GpuParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
@@ -390,14 +390,15 @@ pub fn serve_broker(sock_path: &Path) -> Result<()> {
         if BufReader::new(cloned).read_line(&mut line).is_ok() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("FRAME:") {
-                let p: Vec<&str> = rest.splitn(4, ':').collect();
-                if p.len() == 4 {
+                let p: Vec<&str> = rest.splitn(5, ':').collect();
+                if p.len() == 5 || p.len() == 4 {
                     let el = p[0].parse().unwrap_or(0);
                     let sd = p[1].parse().unwrap_or(0);
                     let it = p[2].parse().unwrap_or(64);
-                    let res = hex_decode(p[3])
+                    let (cam, hex) = if p.len() == 5 { (p[3].parse().unwrap_or(0), p[4]) } else { (0, p[3]) };
+                    let res = hex_decode(hex)
                         .and_then(|b| Ok(String::from_utf8(b)?))
-                        .and_then(|wgsl| broker.dispatch_frame(&wgsl, el, sd, it));
+                        .and_then(|wgsl| broker.dispatch_frame(&wgsl, el, sd, it, cam));
                     match res {
                         Ok((rgb, us)) => {
                             let _ = writeln!(stream, "OK_FRAME:{}:{}", rgb.len(), us);
