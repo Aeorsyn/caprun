@@ -43,7 +43,9 @@ pre{background:#050811;border:1px solid #1e293b;padding:8px;border-radius:5px;fo
       <button data-t="gpu">2. GPU Keyspace Lab</button>
       <button data-t="graph">3. Forensics</button>
       <button data-t="off">4. Offense (Web/TLS)</button>
-      <button data-t="def">5. Defense (Canaries)</button>
+      <button data-t="def">5. Defense</button>
+      <button data-t="ba">6. BlackArch + MSF</button>
+      <button data-t="jtr">7. Next-Gen JtR + Hardening</button>
     </div>
     <div id=t_recon class="tab on">
       <div class=bar>
@@ -95,6 +97,35 @@ pre{background:#050811;border:1px solid #1e293b;padding:8px;border-radius:5px;fo
       </div>
       <div id=canStat style="font-size:11px;color:#fbbf24;margin-bottom:6px">Active Canaries: none</div>
       <table><thead><tr><th>Attacker IP</th><th>Hits</th><th>Reason</th><th>Ready-to-Run Block Rule</th></tr></thead><tbody id=thrBody></tbody></table>
+    </div>
+    <div id=t_ba class="tab">
+      <div class=bar>
+        <input id=baTgt value="127.0.0.1" style="width:150px" placeholder="Target">
+        <select id=baCat style="background:#050811;color:#e2e8f0;border:1px solid #334155;padding:5px;border-radius:5px;font-family:monospace">
+          <option value="all">All Categories</option><option value="caprun">caprun</option><option value="recon">recon</option>
+          <option value="web">web</option><option value="exploit">exploit</option><option value="sniff">sniff</option><option value="crack">crack</option>
+        </select>
+        <button id=baRef>Refresh Arsenal</button>
+      </div>
+      <div id=baGrid class=bar style="max-height:110px;overflow:auto"></div>
+      <div class=bar style="margin-top:6px">
+        <span id=msfP style="font-size:11px;color:#f472b6;align-self:center">msf6 &gt;</span>
+        <input id=msfIn style="flex:1" placeholder="help | search | use <mod> | set RHOSTS 127.0.0.1 | run">
+        <button class=act id=msfGo>Exec</button>
+      </div>
+      <pre id=msfOut>Caprun-MSF + BlackArch Deck ready. Type 'help' or click any arsenal tool above.</pre>
+    </div>
+    <div id=t_jtr class="tab">
+      <div class=bar>
+        <input id=jPw value="flint26" style="width:130px" placeholder="Test plaintext">
+        <button id=goGenH>Hash Target</button>
+        <input id=jMask value="flint?d?d" style="width:130px" placeholder="Mask (?f ?l ?u ?d ?a)">
+        <button class=warn id=goJtr>Run Iris Xe Frequency Sweep</button>
+      </div>
+      <div class=bar>
+        <input id=jHash style="flex:1" placeholder="64-char SHA-256 hex digest">
+      </div>
+      <pre id=jtrOut>Masks: ?f=freq(etaoin...) ?l=lower ?u=upper ?d=digit ?a=all+sym. Auto-generates scrypt defense on hit.</pre>
     </div>
   </div>
 </div>
@@ -180,4 +211,53 @@ document.getElementById('goCan').onclick=async()=>{
   loadThreats();
 };
 document.getElementById('goThr').onclick=loadThreats;
+
+let BA_TOOLS=[];
+async function loadBA(){
+  const r=await fetch('/api/ba_list'); BA_TOOLS=await r.json(); renderBA();
+}
+function renderBA(){
+  const cat=document.getElementById('baCat').value;
+  const g=document.getElementById('baGrid');
+  g.innerHTML=BA_TOOLS.filter(t=>cat==='all'||t.cat===cat).map(t=>
+    `<button title="${t.desc}" style="opacity:${t.installed?1:0.45}" onclick="runBA('${t.id}')">[${t.cat}] ${t.id}</button>`
+  ).join('');
+}
+window.runBA=async(id)=>{
+  const target=document.getElementById('baTgt').value.trim();
+  document.getElementById('msfOut').textContent=`Running ${id} against ${target}...`;
+  const r=await fetch('/api/ba_run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,target})});
+  const d=await r.json();
+  document.getElementById('msfOut').textContent=`[${id} | ${d.ms||0}ms]
+`+d.output;
+};
+async function sendMSF(){
+  const inp=document.getElementById('msfIn'), cmd=inp.value.trim(); if(!cmd) return;
+  inp.value='';
+  const r=await fetch('/api/msf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});
+  const d=await r.json();
+  document.getElementById('msfP').textContent=`msf6 (${d.prompt.split('/').pop()}) >`;
+  document.getElementById('msfOut').textContent=`$ ${cmd}
+`+d.output;
+}
+document.getElementById('baCat').onchange=renderBA;
+document.getElementById('baRef').onclick=loadBA;
+document.getElementById('msfGo').onclick=sendMSF;
+document.getElementById('msfIn').addEventListener('keydown', e=>{ if(e.key==='Enter') sendMSF(); });
+loadBA();
+
+async function genTestHash(){
+  const pw=document.getElementById('jPw').value;
+  const r=await fetch('/api/hash_gen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pw})});
+  const d=await r.json(); document.getElementById('jHash').value=d.sha256;
+}
+document.getElementById('goGenH').onclick=genTestHash;
+document.getElementById('goJtr').onclick=async()=>{
+  if(!document.getElementById('jHash').value) await genTestHash();
+  const hash=document.getElementById('jHash').value.trim(), mask=document.getElementById('jMask').value.trim();
+  document.getElementById('jtrOut').textContent='Compiling WGSL frequency kernel & sweeping on Intel Iris Xe...';
+  const r=await fetch('/api/jtr_sweep',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hash,mask})});
+  document.getElementById('jtrOut').textContent=JSON.stringify(await r.json(),null,2);
+};
+genTestHash();
 </script></body></html>"""

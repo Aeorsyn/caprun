@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import collections, http.server, json, re, socket, subprocess, sys, threading, time, urllib.parse, zlib
-import cortex, sec_engine, sec_modules, sec_ui
+import cortex, sec_engine, sec_jtr, sec_kdf, sec_modules, sec_msf, sec_ui
 
 FLOW_Q = collections.deque(maxlen=512)
 TCPDUMP_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+)")
@@ -60,6 +60,19 @@ class Hdl(http.server.BaseHTTPRequestHandler):
                 self.send_json(sec_modules.web_fuzz(body.get("url", "http://127.0.0.1:8095"), body.get("words", ""), push_flow))
             elif self.path == "/api/tls":
                 self.send_json(sec_modules.tls_dns_audit(body.get("host", "github.com"), int(body.get("port", 443))))
+            elif self.path == "/api/ba_run":
+                self.send_json(sec_msf.run_tool(body.get("id", ""), body.get("target", "127.0.0.1"), push_flow))
+            elif self.path == "/api/jtr_sweep":
+                self.send_json(sec_jtr.gpu_audit_keyspace(body.get("hash", ""), body.get("mask", "?f?f?f?f"), push_flow))
+            elif self.path == "/api/hash_gen":
+                pw = body.get("pw", "flint26").encode()
+                self.send_json({"sha256": __import__("hashlib").sha256(pw).hexdigest()})
+            elif self.path == "/api/kdf_audit":
+                self.send_json(sec_kdf.audit_hashes(body.get("samples", []), push_flow))
+            elif self.path == "/api/kdf_bench":
+                self.send_json(sec_kdf.bench_kdf(body.get("gpu_mhps", 150.0), body.get("len", 8), body.get("charset", 36)))
+            elif self.path == "/api/msf":
+                self.send_json(sec_msf.msf_exec(body.get("cmd", ""), push_flow))
             elif self.path == "/api/canary":
                 self.send_json(sec_modules.toggle_canary(int(body.get("port", 2222)), body.get("profile", "ssh"), push_flow))
         except (BrokenPipeError, ConnectionResetError):
@@ -72,6 +85,8 @@ class Hdl(http.server.BaseHTTPRequestHandler):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
                     s.connect(cortex.SOCK); s.sendall(b"CORTEX:RESET\n"); s.recv(64)
                 self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+            elif u.path == "/api/ba_list":
+                self.send_json(sec_msf.list_catalog())
             elif u.path == "/api/threats":
                 self.send_json({"threats": sec_modules.get_threats(), "canaries": sorted(sec_modules.CANARIES.keys())})
             elif u.path == "/api/graph":
