@@ -273,6 +273,67 @@ impl VulkanBroker {
         let pipe = &self.custom_pipelines[&key];
         self.run_pipeline(pipe, elements, seed, iters, warm)
     }
+
+    pub fn dispatch_frame(&mut self, wgsl: &str, elements: u32, seed: u32, iters: u32) -> Result<(Vec<u8>, u128)> {
+        if elements == 0 || elements > 1_048_576 { bail!("elements out of bounds"); }
+        let key = blake3::hash(wgsl.as_bytes()).to_hex().to_string();
+        if !self.custom_pipelines.contains_key(&key) {
+            if self.custom_pipelines.len() >= 64 { self.custom_pipelines.clear(); }
+            let pipe = self.compile_validated(wgsl)?;
+            self.custom_pipelines.insert(key.clone(), pipe);
+        }
+        let pipe = &self.custom_pipelines[&key];
+        let byte_size = (elements as u64) * 4;
+        let storage = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None, size: byte_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false,
+        });
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None, size: byte_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let params = GpuParams { seed, count: elements, iters, _pad: 0 };
+        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None, size: std::mem::size_of::<GpuParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&params));
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: storage.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
+            ],
+        });
+        let t_gpu = Instant::now();
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(elements.div_ceil(64), 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&storage, 0, &staging, 0, byte_size);
+        self.queue.submit(Some(enc.finish()));
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()??;
+        let us = t_gpu.elapsed().as_micros();
+        let data = slice.get_mapped_range();
+        let floats: &[f32] = bytemuck::cast_slice(&data);
+        let mut rgb = Vec::with_capacity(floats.len() * 3);
+        for &v in floats {
+            let c = v.clamp(0.0, 16_777_215.0) as u32;
+            rgb.push(((c >> 16) & 0xff) as u8);
+            rgb.push(((c >> 8) & 0xff) as u8);
+            rgb.push((c & 0xff) as u8);
+        }
+        drop(data);
+        staging.unmap();
+        Ok((rgb, us))
+    }
 }
 pub fn dispatch_vulkan_compute(elements: u32, seed: u32, iters: u32) -> Result<GpuResult> {
     VulkanBroker::new()?.dispatch(elements, seed, iters, false)
@@ -328,6 +389,26 @@ pub fn serve_broker(sock_path: &Path) -> Result<()> {
         let mut line = String::new();
         if BufReader::new(cloned).read_line(&mut line).is_ok() {
             let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("FRAME:") {
+                let p: Vec<&str> = rest.splitn(4, ':').collect();
+                if p.len() == 4 {
+                    let el = p[0].parse().unwrap_or(0);
+                    let sd = p[1].parse().unwrap_or(0);
+                    let it = p[2].parse().unwrap_or(64);
+                    let res = hex_decode(p[3])
+                        .and_then(|b| Ok(String::from_utf8(b)?))
+                        .and_then(|wgsl| broker.dispatch_frame(&wgsl, el, sd, it));
+                    match res {
+                        Ok((rgb, us)) => {
+                            let _ = writeln!(stream, "OK_FRAME:{}:{}", rgb.len(), us);
+                            let _ = stream.write_all(&rgb);
+                        }
+                        Err(e) => { let _ = writeln!(stream, "ERR:{}", e); }
+                    }
+                    let _ = stream.flush();
+                }
+                continue;
+            }
             let res = if let Some(rest) = trimmed.strip_prefix("WGSL:") {
                 let p: Vec<&str> = rest.splitn(4, ':').collect();
                 if p.len() == 4 {
