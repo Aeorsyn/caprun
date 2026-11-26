@@ -389,6 +389,32 @@ pub fn serve_broker(sock_path: &Path) -> Result<()> {
         let mut line = String::new();
         if BufReader::new(cloned).read_line(&mut line).is_ok() {
             let trimmed = line.trim();
+            if trimmed == "CORTEX:RESET" {
+                *CORTEX_STATE.lock().unwrap() = None;
+                let _ = writeln!(stream, "OK_RESET");
+                let _ = stream.flush();
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("CORTEX:") {
+                let p: Vec<&str> = rest.splitn(4, ':').collect();
+                if p.len() == 4 {
+                    let tick = p[0].parse().unwrap_or(0);
+                    let stim = p[1].parse().unwrap_or(0xFFFFFFFF);
+                    let mode = p[2].parse().unwrap_or(0);
+                    let res = hex_decode(p[3])
+                        .and_then(|b| Ok(String::from_utf8(b)?))
+                        .and_then(|wgsl| cortex_step(&broker.device, &broker.queue, &wgsl, tick, stim, mode));
+                    match res {
+                        Ok((rgb, us, surp)) => {
+                            let _ = writeln!(stream, "OK_CORTEX:{}:{}:{}", rgb.len(), us, surp);
+                            let _ = stream.write_all(&rgb);
+                        }
+                        Err(e) => { let _ = writeln!(stream, "ERR:{}", e); }
+                    }
+                    let _ = stream.flush();
+                }
+                continue;
+            }
             if let Some(rest) = trimmed.strip_prefix("FRAME:") {
                 let p: Vec<&str> = rest.splitn(5, ':').collect();
                 if p.len() == 5 || p.len() == 4 {
@@ -458,4 +484,114 @@ pub fn bench_gpu(sock_path: &Path, elements: u32, iters: u32, runs: usize) -> Re
     }
     println!("  -> Peak: {:.1} GFLOPS ({:.3} TFLOPS)", best, best / 1000.0);
     Ok(())
+}
+
+
+struct CortexState {
+    bgl: wgpu::BindGroupLayout,
+    pl: wgpu::PipelineLayout,
+    pipe: Option<(String, wgpu::ComputePipeline)>,
+    state_a: wgpu::Buffer,
+    state_b: wgpu::Buffer,
+    out_buf: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    uniform: wgpu::Buffer,
+    ping: bool,
+}
+
+static CORTEX_STATE: std::sync::Mutex<Option<CortexState>> = std::sync::Mutex::new(None);
+
+fn cortex_step(
+    device: &wgpu::Device, queue: &wgpu::Queue,
+    wgsl: &str, tick: u32, stim: u32, mode: u32,
+) -> Result<(Vec<u8>, u128, u32)> {
+    const N: u32 = 262_144;
+    let mut guard = CORTEX_STATE.lock().unwrap();
+    if guard.is_none() {
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cortex_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None } },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None } },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None } },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None } },
+            ],
+        });
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cortex_pl"), bind_group_layouts: &[&bgl], push_constant_ranges: &[],
+        });
+        let st_sz = (N as u64) * 16;
+        let px_sz = (N as u64) * 4;
+        let state_a = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: st_sz, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let state_b = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: st_sz, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let out_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: px_sz, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let staging = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: px_sz, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: std::mem::size_of::<GpuParams>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        *guard = Some(CortexState { bgl, pl, pipe: None, state_a, state_b, out_buf, staging, uniform, ping: false });
+    }
+    let st = guard.as_mut().unwrap();
+    let key = blake3::hash(wgsl.as_bytes()).to_hex().to_string();
+    if st.pipe.as_ref().map(|(k, _)| k != &key).unwrap_or(true) {
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cortex_wgsl"), source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cortex_pipe"), layout: Some(&st.pl), module: &module, entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+            bail!("Cortex WGSL rejected: {}", err);
+        }
+        st.pipe = Some((key, pipe));
+    }
+    let (src_buf, dst_buf) = if st.ping { (&st.state_b, &st.state_a) } else { (&st.state_a, &st.state_b) };
+    let params = GpuParams { seed: tick, count: N, iters: mode, _pad: stim };
+    queue.write_buffer(&st.uniform, 0, bytemuck::bytes_of(&params));
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &st.bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: st.out_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: st.uniform.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: src_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: dst_buf.as_entire_binding() },
+        ],
+    });
+    let t0 = Instant::now();
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        pass.set_pipeline(&st.pipe.as_ref().unwrap().1);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups(N.div_ceil(64), 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&st.out_buf, 0, &st.staging, 0, (N as u64) * 4);
+    queue.submit(Some(enc.finish()));
+    let slice = st.staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
+    device.poll(wgpu::Maintain::Wait);
+    rx.recv()??;
+    let us = t0.elapsed().as_micros();
+    let data = slice.get_mapped_range();
+    let floats: &[f32] = bytemuck::cast_slice(&data);
+    let mut rgb = Vec::with_capacity(floats.len() * 3);
+    let mut surp: u32 = 0;
+    for &v in floats {
+        let c = v.clamp(0.0, 16_777_215.0) as u32;
+        let r = ((c >> 16) & 0xff) as u8;
+        let g = ((c >> 8) & 0xff) as u8;
+        let b = (c & 0xff) as u8;
+        if r > 170 && g < 120 { surp += 1; }
+        rgb.push(r); rgb.push(g); rgb.push(b);
+    }
+    drop(data);
+    st.staging.unmap();
+    st.ping = !st.ping;
+    Ok((rgb, us, surp))
 }
