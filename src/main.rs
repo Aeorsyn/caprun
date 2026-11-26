@@ -262,6 +262,37 @@ fn cmd_run(
                     child_stdin.flush()?;
                 }
             }
+        } else if let Some(req) = line.strip_prefix("GPU_WGSL:") {
+            if !allow_vulkan {
+                writeln!(child_stdin, "GPU_ERR:denied")?;
+                child_stdin.flush()?;
+                continue;
+            }
+            let p: Vec<&str> = req.splitn(4, ':').collect();
+            let elements: u32 = p.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let gseed: u32 = p.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let iters: u32 = p.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
+            let wgsl_res = p.get(3).ok_or_else(|| anyhow::anyhow!("missing wgsl"))
+                .and_then(|h| gpu::hex_decode(h))
+                .and_then(|b| Ok(String::from_utf8(b)?));
+            let res = wgsl_res.and_then(|wgsl| {
+                match gpu::try_dispatch_wgsl_via_daemon(&sock_path, &wgsl, elements, gseed, iters) {
+                    Some(r) => r,
+                    None => gpu::dispatch_vulkan_wgsl(&wgsl, elements, gseed, iters),
+                }
+            });
+            match res {
+                Ok(r) => {
+                    let mode = if r.warm { "WARM DAEMON" } else { "cold inline" };
+                    eprintln!("[vulkan-broker:{}:CUSTOM_WGSL] {} | {} threads in {:.2} ms | checksum={}", mode, r.adapter_name, elements, r.compute_us as f64 / 1000.0, r.checksum);
+                    writeln!(child_stdin, "GPU_RES:{}:{}", r.checksum, r.compute_us)?;
+                }
+                Err(e) => {
+                    eprintln!("[vulkan-broker:CUSTOM_WGSL] REJECTED: {}", e);
+                    writeln!(child_stdin, "GPU_ERR:rejected")?;
+                }
+            }
+            child_stdin.flush()?;
         } else if let Some(json_str) = line.strip_prefix("DELTA:") {
             let delta: DeltaPayload = serde_json::from_str(json_str)
                 .with_context(|| format!("Invalid delta JSON from worker: {}", json_str))?;
@@ -435,6 +466,32 @@ fn cmd_worker(fuel: u64, seed: i32, allow_vulkan: bool, test_escape: bool) -> Re
                         if let Ok(val) = cs.parse::<i32>() {
                             return val;
                         }
+                    }
+                }
+            }
+            -2
+        },
+    )?;
+
+    linker.func_wrap(
+        "cap",
+        "gpu_dispatch_wgsl",
+        move |mut caller: Caller<'_, ()>, ptr: i32, len: i32, elements: i32, gseed: i32, iters: i32| -> i32 {
+            if !allow_vulkan {
+                eprintln!("[worker] CAPABILITY DENIED: custom WGSL requested without --cap vulkan");
+                return -1;
+            }
+            if len <= 0 || len > 32_768 { return -3; }
+            let Some(Extern::Memory(mem)) = caller.get_export("memory") else { return -2; };
+            let mut buf = vec![0u8; len as usize];
+            if mem.read(&caller, ptr as usize, &mut buf).is_err() { return -2; }
+            println!("GPU_WGSL:{}:{}:{}:{}", elements, gseed, iters, gpu::hex_encode(&buf));
+            let _ = std::io::stdout().flush();
+            let mut resp = String::new();
+            if std::io::stdin().read_line(&mut resp).is_ok() {
+                if let Some(rest) = resp.trim().strip_prefix("GPU_RES:") {
+                    if let Some(cs) = rest.split(':').next() {
+                        if let Ok(v) = cs.parse::<i32>() { return v; }
                     }
                 }
             }

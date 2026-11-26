@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -11,28 +12,19 @@ use std::time::Instant;
 struct GpuParams {
     seed: u32,
     count: u32,
-    _pad0: u32,
-    _pad1: u32,
+    iters: u32,
+    _pad: u32,
 }
 
-const WGSL_COMPUTE: &str = r#"
-struct Params {
-    seed: u32,
-    count: u32,
-    _pad0: u32,
-    _pad1: u32,
-};
-
+const DEFAULT_WGSL: &str = r#"
+struct Params { seed: u32, count: u32, iters: u32, _pad: u32 };
 @group(0) @binding(0) var<storage, read_write> out_buf: array<f32>;
 @group(0) @binding(1) var<uniform> params: Params;
-
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    if (idx >= params.count) {
-        return;
-    }
-    let iters = select(params._pad0, 256u, params._pad0 == 0u);
+    if (idx >= params.count) { return; }
+    let iters = select(params.iters, 256u, params.iters == 0u);
     let base = f32((idx ^ params.seed) & 1023u) * 0.001 + 1.0;
     var a = vec4<f32>(base, base + 0.1, base + 0.2, base + 0.3);
     var b = vec4<f32>(base + 0.4, base + 0.5, base + 0.6, base + 0.7);
@@ -51,6 +43,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+pub fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
+pub fn hex_decode(hex: &str) -> Result<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        bail!("Invalid hex length");
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex[i..i + 2], 16).context("Invalid hex byte")?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
 pub struct GpuResult {
     pub adapter_name: String,
     pub checksum: u64,
@@ -62,35 +75,66 @@ pub struct VulkanBroker {
     adapter_name: String,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+    default_pipeline: wgpu::ComputePipeline,
+    custom_pipelines: HashMap<String, wgpu::ComputePipeline>,
 }
-
 impl VulkanBroker {
     pub fn new() -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
-
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
         }))
-        .context("No Vulkan GPU adapter available (check mesa-vulkan-drivers)")?;
+        .context("No Vulkan GPU adapter available")?;
 
         let adapter_name = adapter.get_info().name;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))?;
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("caprun_vulkan_compute"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(WGSL_COMPUTE)),
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("caprun_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("caprun_pl"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("caprun_compute_pipeline"),
-            layout: None,
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("default_wgsl"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DEFAULT_WGSL)),
+        });
+        let default_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("default_pipe"),
+            layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
@@ -101,182 +145,214 @@ impl VulkanBroker {
             adapter_name,
             device,
             queue,
-            pipeline,
+            bind_group_layout,
+            pipeline_layout,
+            default_pipeline,
+            custom_pipelines: HashMap::new(),
         })
     }
 
-    pub fn dispatch(&self, elements: u32, seed: u32, iters: u32, warm: bool) -> Result<GpuResult> {
-        if elements == 0 || elements > 1_048_576 {
-            bail!("GPU dispatch elements out of safe bounds (1..=1048576)");
+    fn compile_validated(&self, wgsl: &str) -> Result<wgpu::ComputePipeline> {
+        if wgsl.is_empty() || wgsl.len() > 32_768 {
+            bail!("WGSL size out of bounds (1..=32768 bytes)");
+        }
+        if !wgsl.contains("@compute") || !wgsl.contains("fn main") {
+            bail!("WGSL must declare @compute and fn main");
         }
 
-        let byte_size = (elements as u64) * std::mem::size_of::<f32>() as u64;
-        let storage_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("guest_wgsl"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(wgsl)),
+        });
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            bail!("WGSL shader validation failed: {}", err);
+        }
+
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipe = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("guest_pipe"),
+            layout: Some(&self.pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        if let Some(err) = pollster::block_on(self.device.pop_error_scope()) {
+            bail!("WGSL pipeline validation failed: {}", err);
+        }
+        Ok(pipe)
+    }
+
+    fn run_pipeline(
+        &self,
+        pipe: &wgpu::ComputePipeline,
+        elements: u32,
+        seed: u32,
+        iters: u32,
+        warm: bool,
+    ) -> Result<GpuResult> {
+        if elements == 0 || elements > 1_048_576 {
+            bail!("GPU elements out of safe bounds (1..=1048576)");
+        }
+        if iters == 0 || iters > 65_536 {
+            bail!("GPU iters out of safe bounds (1..=65536)");
+        }
+        let byte_size = (elements as u64) * 4;
+        let storage = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("storage_out"),
             size: byte_size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-
-        let staging_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("staging_readback"),
             size: byte_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let params = GpuParams {
-            seed,
-            count: elements,
-            _pad0: iters,
-            _pad1: 0,
-        };
-        let uniform_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let params = GpuParams { seed, count: elements, iters, _pad: 0 };
+        let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform_params"),
             size: std::mem::size_of::<GpuParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue
-            .write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&params));
+        self.queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&params));
 
-        let bind_group_layout = self.pipeline.get_bind_group_layout(0);
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compute_bg"),
-            layout: &bind_group_layout,
+            layout: &self.bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: storage_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: uniform_buf.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: storage.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
             ],
         });
 
         let t_gpu = Instant::now();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("compute_encoder"),
-            });
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("compute_pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            cpass.dispatch_workgroups(elements.div_ceil(64), 1, 1);
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(elements.div_ceil(64), 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&storage_buf, 0, &staging_buf, 0, byte_size);
-        self.queue.submit(Some(encoder.finish()));
+        enc.copy_buffer_to_buffer(&storage, 0, &staging, 0, byte_size);
+        self.queue.submit(Some(enc.finish()));
 
-        let slice = staging_buf.slice(..);
+        let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res);
-        });
+        slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
 
         let compute_us = t_gpu.elapsed().as_micros();
         let data = slice.get_mapped_range();
         let floats: &[f32] = bytemuck::cast_slice(&data);
-        let sum: f64 = floats.iter().map(|&v| v as f64).sum();
+        let sum: f64 = floats.iter().filter(|v| v.is_finite()).map(|&v| v as f64).sum();
         let checksum = (sum.abs() as u64) % 10_000_000;
         drop(data);
-        staging_buf.unmap();
+        staging.unmap();
 
-        Ok(GpuResult {
-            adapter_name: self.adapter_name.clone(),
-            checksum,
-            compute_us,
-            warm,
-        })
+        Ok(GpuResult { adapter_name: self.adapter_name.clone(), checksum, compute_us, warm })
+    }
+
+    pub fn dispatch(&self, elements: u32, seed: u32, iters: u32, warm: bool) -> Result<GpuResult> {
+        self.run_pipeline(&self.default_pipeline, elements, seed, iters, warm)
+    }
+
+    pub fn dispatch_wgsl(&mut self, wgsl: &str, elements: u32, seed: u32, iters: u32, warm: bool) -> Result<GpuResult> {
+        let key = blake3::hash(wgsl.as_bytes()).to_hex().to_string();
+        if !self.custom_pipelines.contains_key(&key) {
+            if self.custom_pipelines.len() >= 64 {
+                self.custom_pipelines.clear();
+            }
+            let pipe = self.compile_validated(wgsl)?;
+            self.custom_pipelines.insert(key.clone(), pipe);
+        }
+        let pipe = &self.custom_pipelines[&key];
+        self.run_pipeline(pipe, elements, seed, iters, warm)
     }
 }
-
 pub fn dispatch_vulkan_compute(elements: u32, seed: u32, iters: u32) -> Result<GpuResult> {
-    let broker = VulkanBroker::new()?;
-    broker.dispatch(elements, seed, iters, false)
+    VulkanBroker::new()?.dispatch(elements, seed, iters, false)
 }
 
-pub fn try_dispatch_via_daemon(
-    sock_path: &Path,
-    elements: u32,
-    seed: u32,
-    iters: u32,
-) -> Option<Result<GpuResult>> {
-    let mut stream = UnixStream::connect(sock_path).ok()?;
-    if writeln!(stream, "{}:{}:{}", elements, seed, iters).is_err() {
-        return None;
-    }
-    let _ = stream.flush();
+pub fn dispatch_vulkan_wgsl(wgsl: &str, elements: u32, seed: u32, iters: u32) -> Result<GpuResult> {
+    VulkanBroker::new()?.dispatch_wgsl(wgsl, elements, seed, iters, false)
+}
 
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return None;
-    }
+fn parse_daemon_reply(line: &str) -> Option<Result<GpuResult>> {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix("OK:") {
-        let parts: Vec<&str> = rest.splitn(3, ':').collect();
-        if parts.len() == 3 {
-            let checksum = parts[0].parse::<u64>().ok()?;
-            let compute_us = parts[1].parse::<u128>().ok()?;
-            let adapter_name = parts[2].to_string();
+        let p: Vec<&str> = rest.splitn(3, ':').collect();
+        if p.len() == 3 {
             return Some(Ok(GpuResult {
-                adapter_name,
-                checksum,
-                compute_us,
+                checksum: p[0].parse().ok()?,
+                compute_us: p[1].parse().ok()?,
+                adapter_name: p[2].to_string(),
                 warm: true,
             }));
         }
     }
-    Some(Err(anyhow::anyhow!("Broker returned: {}", trimmed)))
+    Some(Err(anyhow::anyhow!("{}", trimmed)))
+}
+
+pub fn try_dispatch_via_daemon(sock: &Path, elements: u32, seed: u32, iters: u32) -> Option<Result<GpuResult>> {
+    let mut s = UnixStream::connect(sock).ok()?;
+    writeln!(s, "{}:{}:{}", elements, seed, iters).ok()?;
+    let _ = s.flush();
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).ok()?;
+    parse_daemon_reply(&line)
+}
+
+pub fn try_dispatch_wgsl_via_daemon(sock: &Path, wgsl: &str, elements: u32, seed: u32, iters: u32) -> Option<Result<GpuResult>> {
+    let mut s = UnixStream::connect(sock).ok()?;
+    writeln!(s, "WGSL:{}:{}:{}:{}", elements, seed, iters, hex_encode(wgsl.as_bytes())).ok()?;
+    let _ = s.flush();
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).ok()?;
+    parse_daemon_reply(&line)
 }
 
 pub fn serve_broker(sock_path: &Path) -> Result<()> {
-    if sock_path.exists() {
-        let _ = std::fs::remove_file(sock_path);
-    }
-    let broker = VulkanBroker::new()?;
-    let listener = UnixListener::bind(sock_path)
-        .with_context(|| format!("Failed to bind {:?}", sock_path))?;
-    eprintln!(
-        "[vulkan-daemon] {} warm & listening on {:?}",
-        broker.adapter_name, sock_path
-    );
+    if sock_path.exists() { let _ = std::fs::remove_file(sock_path); }
+    let mut broker = VulkanBroker::new()?;
+    let listener = UnixListener::bind(sock_path).with_context(|| format!("Failed to bind {:?}", sock_path))?;
+    eprintln!("[vulkan-daemon] {} warm & listening (fixed + custom WGSL) on {:?}", broker.adapter_name, sock_path);
 
-    for conn in listener.incoming() {
-        if let Ok(mut stream) = conn {
-            let mut reader = BufReader::new(match stream.try_clone() {
-                Ok(s) => s,
-                Err(_) => continue,
-            });
-            let mut line = String::new();
-            if reader.read_line(&mut line).is_ok() {
-                let parts: Vec<&str> = line.trim().split(':').collect();
-                let elements: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-                let seed: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let iters: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
-                match broker.dispatch(elements, seed, iters, true) {
-                    Ok(res) => {
-                        let _ = writeln!(
-                            stream,
-                            "OK:{}:{}:{}",
-                            res.checksum, res.compute_us, res.adapter_name
-                        );
+    for conn in listener.incoming().flatten() {
+        let mut stream = conn;
+        let Ok(cloned) = stream.try_clone() else { continue; };
+        let mut line = String::new();
+        if BufReader::new(cloned).read_line(&mut line).is_ok() {
+            let trimmed = line.trim();
+            let res = if let Some(rest) = trimmed.strip_prefix("WGSL:") {
+                let p: Vec<&str> = rest.splitn(4, ':').collect();
+                if p.len() == 4 {
+                    let el = p[0].parse().unwrap_or(0);
+                    let sd = p[1].parse().unwrap_or(0);
+                    let it = p[2].parse().unwrap_or(256);
+                    match hex_decode(p[3]).and_then(|b| Ok(String::from_utf8(b)?)) {
+                        Ok(wgsl) => broker.dispatch_wgsl(&wgsl, el, sd, it, true),
+                        Err(e) => Err(e),
                     }
-                    Err(e) => {
-                        let _ = writeln!(stream, "ERR:{}", e);
-                    }
+                } else {
+                    Err(anyhow::anyhow!("Malformed WGSL request"))
                 }
-                let _ = stream.flush();
+            } else {
+                let p: Vec<&str> = trimmed.split(':').collect();
+                let el = p.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let sd = p.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let it = p.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
+                broker.dispatch(el, sd, it, true)
+            };
+            match res {
+                Ok(r) => { let _ = writeln!(stream, "OK:{}:{}:{}", r.checksum, r.compute_us, r.adapter_name); }
+                Err(e) => { let _ = writeln!(stream, "ERR:{}", e); }
             }
+            let _ = stream.flush();
         }
     }
     Ok(())
