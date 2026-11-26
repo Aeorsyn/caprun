@@ -1,46 +1,34 @@
 # caprun
 
-Zero-install, content-addressed capability runner for bare-metal Linux.
+Zero-install, content-addressed capability runner with Linux kernel isolation and 1 TFLOPS validated Vulkan GPU brokering.
 
-`caprun` executes immutable BLAKE3-addressed WebAssembly capabilities inside a dual Wasmtime + Linux Kernel (Landlock + seccomp-BPF) sandbox, brokers hardware access to CPU SIMD128 and Intel Iris Xe Vulkan compute, and commits structured deltas to a local SQLite semantic object graph (`~/.cas/graph.db`) with zero bytes extracted to disk.
+Play the WebGPU showcase: **[Hyperfold 4D](https://YOUR_USERNAME.github.io/caprun/)**
 
-## Architecture
+## Why caprun?
 
-```text
-Intent / CLI (or local llama-server via intent.py)
-  |
-  v
-[ Parent Capability Broker (Host Boundary) ]
-  - Verifies BLAKE3 digest in ~/.cas/blobs/ (0 B extracted)
-  - Caches native x86_64 .cwasm in ~/.cas/cache/
-  - Brokers --cap vulkan -> Warm Unix-socket GPU daemon
-  - Commits JSON deltas -> ~/.cas/graph.db
-  | (stdin)          ^ (stdout)
-  v                  |
-[ Disposable Sandbox Worker (Zero Ambient Authority) ]
-  1. RLIMIT_CORE=0 + PR_SET_DUMPABLE=0 (instant SIGSYS)
-  2. PR_SET_NO_NEW_PRIVS + Landlock ABI v4 (0 FS paths)
-  3. seccomp-BPF strict allow-list (~24 syscalls)
-  4. Wasmtime linear memory + deterministic fuel metering
-```
+- **Zero-install CAS:** Capabilities are verified by BLAKE3 hash (`0 B` extracted to disk).
+- **Linux isolation:** `USER+NET` namespaces, `PR_SET_DUMPABLE=0`, Landlock ABI v4, and `seccomp-BPF`.
+- **Warm Vulkan broker:** Guests never touch `/dev/dri`. Custom WGSL is validated in `wgpu` error scopes, locked to a 2-binding ABI, and cached by BLAKE3 digest.
+- **Provenance:** Every run commits a hash-attributed delta to `~/.cas/graph.db`.
 
-## Verified Benchmarks (HP Envy x360 - Ubuntu 24.04 x86_64)
+## Verified Benchmarks (Intel Iris Xe ADL GT2, Ubuntu 24.04)
 
-| Capability Workload | Silicon Target | Pure Compute | Full Lifecycle | Notes |
-| :--- | :--- | ---: | ---: | :--- |
-| SIMD128 Vector Math (80M FLOPs) | x86_64 CPU (`f32x4`) | 5.78-12.40 ms | 11.30-17.18 ms | ~13.8 GFLOPS single-core; 28M fuel |
-| Hyperdimensional Recall (10,240-bit) | x86_64 CPU | 0.06-0.12 ms | 4.77 ms (med) | 25% bit-flip noise (75% vs 49% random) |
-| Vulkan Compute (Denied, No Token) | Capability Gate | 0.05 ms | 3.89 ms | Zero-authority denial without `--cap vulkan` |
-| Vulkan Compute (134M+ FLOPs, Cold) | Intel Iris Xe (ADL GT2) | 5.35 ms | 58.29 ms | 262,144 threads (25.1 GFLOPS) |
-| Vulkan Compute (134M+ FLOPs, Warm) | Intel Iris Xe Daemon | ~3.3 ms | 8.93 ms (med) | 262,144 threads (40.3 GFLOPS median) |
-| Live Kernel seccomp-BPF Escape Block | Linux Kernel (`SIGSYS`) | - | 3.65 ms (med) | Instant kill on forbidden `socket()` |
+| Workload | Result | Notes |
+| :--- | :--- | :--- |
+| FP32 Compute (`bench-gpu`) | **1.005 TFLOPS** | 262k threads x 8,192 vec4 FMA (68.36 ms) |
+| Custom Guest WGSL (cached) | **8.30 ms** | Verify -> Sandbox -> 262k GPU threads -> Graph |
+| Live 3D Raymarching (`FRAME:`) | **1-2 ms / 60 FPS** | 512x512 Hyperfold 4D over Unix socket |
+| Kernel Escape (`--test-escape`) | **3.65 ms `SIGSYS`** | Forbidden `socket()` killed by `seccomp-BPF` |
+| Poisoned WGSL Shader | **Rejected safely** | Caught by `wgpu` validation scope |
 
 ## Quickstart
 
-```bash
-cargo build --release
-./target/release/caprun broker &
-./demo.sh
-./bench.sh 5
-./target/release/caprun graph --limit 15
-```
+    cargo build --release
+    ./target/release/caprun broker &
+    ./showcase.sh
+    ./target/release/caprun bench-gpu --iters 8192 --runs 3
+    ./hyperfold_shooter.py
+
+## MCP Server (Claude / Cursor / Local LLMs)
+
+`mcp_server.py` exposes `run_wgsl_gpu`, `bench_gpu`, and `query_graph` over standard MCP `stdio` JSON-RPC 2.0.
