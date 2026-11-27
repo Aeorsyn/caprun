@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import collections, http.server, json, re, socket, subprocess, sys, threading, time, urllib.parse, zlib
-import cortex, sec_engine, sec_jtr, sec_kdf, sec_modules, sec_msf, sec_ui
+import cortex, sec_nextgen, sec_engine, sec_jtr, sec_kdf, sec_modules, sec_msf, sec_ui
 
 FLOW_Q = collections.deque(maxlen=512)
 TCPDUMP_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+)")
@@ -62,6 +62,12 @@ class Hdl(http.server.BaseHTTPRequestHandler):
                 self.send_json(sec_modules.tls_dns_audit(body.get("host", "github.com"), int(body.get("port", 443))))
             elif self.path == "/api/ba_run":
                 self.send_json(sec_msf.run_tool(body.get("id", ""), body.get("target", "127.0.0.1"), push_flow))
+            elif self.path == "/api/ng_xor":
+                self.send_json(sec_nextgen.gpu_xor_entropy(body.get("payload", ""), push_flow))
+            elif self.path == "/api/ng_beacon":
+                self.send_json(sec_nextgen.gpu_beacon_hunt(body.get("ts", ""), body.get("ip", "203.0.113.42"), push_flow))
+            elif self.path == "/api/ng_dga":
+                self.send_json(sec_nextgen.gpu_dga_tunnel(body.get("domains", ""), push_flow))
             elif self.path == "/api/jtr_sweep":
                 self.send_json(sec_jtr.gpu_audit_keyspace(body.get("hash", ""), body.get("mask", "?f?f?f?f"), push_flow))
             elif self.path == "/api/hash_gen":
@@ -116,7 +122,28 @@ class Hdl(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+def ensure_broker():
+    import os
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(cortex.SOCK)
+        return
+    except OSError:
+        pass
+    try: os.remove(cortex.SOCK)
+    except OSError: pass
+    subprocess.Popen(["./target/release/caprun", "broker"], stdout=open("/tmp/caprun_broker.log", "ab"), stderr=subprocess.STDOUT)
+    for _ in range(30):
+        time.sleep(0.1)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(cortex.SOCK)
+            return
+        except OSError:
+            pass
+
 if __name__ == "__main__":
+    ensure_broker()
     piped = not sys.stdin.isatty()
     threading.Thread(target=stdin_loop if piped else ss_loop, daemon=True).start()
     print(f"Caprun SecSuite OpsDeck ({'tcpdump pipe' if piped else 'ss poller'}) -> http://localhost:8095")

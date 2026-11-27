@@ -46,6 +46,7 @@ pre{background:#050811;border:1px solid #1e293b;padding:8px;border-radius:5px;fo
       <button data-t="def">5. Defense</button>
       <button data-t="ba">6. BlackArch + MSF</button>
       <button data-t="jtr">7. Next-Gen JtR + Hardening</button>
+      <button data-t="ng">8. Silicon Lab</button>
     </div>
     <div id=t_recon class="tab on">
       <div class=bar>
@@ -126,6 +127,22 @@ pre{background:#050811;border:1px solid #1e293b;padding:8px;border-radius:5px;fo
         <input id=jHash style="flex:1" placeholder="64-char SHA-256 hex digest">
       </div>
       <pre id=jtrOut>Masks: ?f=freq(etaoin...) ?l=lower ?u=upper ?d=digit ?a=all+sym. Auto-generates scrypt defense on hit.</pre>
+    </div>
+    <div id=t_ng class="tab">
+      <div class=bar>
+        <input id=ngXor value="hex:2a363632786d6d21706c202330296c2d27366d202723212d2c" style="flex:1" placeholder="Hex or raw payload">
+        <button class=warn id=goNgXor>GPU XOR + Entropy (YARA)</button>
+      </div>
+      <div class=bar>
+        <input id=ngBip value="203.0.113.42" style="width:120px" placeholder="Dest IP">
+        <input id=ngBts value="0, 59.2, 121.1, 179.8, 240.5, 298.9, 361.0, 419.4" style="flex:1" placeholder="Timestamps (sec)">
+        <button class=act id=goNgBcn>GPU C2 Beacon Hunt</button>
+      </div>
+      <div class=bar>
+        <input id=ngDga value="github.com, cloudflare.com, xq9k2m7v4p1z.top, 4a6f686e2d657866696c2d3031.c2.bad.net" style="flex:1" placeholder="Comma-sep domains">
+        <button class=act id=goNgDga>GPU DGA / Tunnel Scan</button>
+      </div>
+      <pre id=ngOut>Silicon Lab: YARA, Zeek, and DNS blocklists rethought as WGSL parallel kernels + auto-defense rules.</pre>
     </div>
   </div>
 </div>
@@ -260,4 +277,23 @@ document.getElementById('goJtr').onclick=async()=>{
   document.getElementById('jtrOut').textContent=JSON.stringify(await r.json(),null,2);
 };
 genTestHash();
+
+document.getElementById('goNgXor').onclick=async()=>{
+  const payload=document.getElementById('ngXor').value;
+  document.getElementById('ngOut').textContent='Running 256-key parallel XOR + Shannon entropy on Iris Xe...';
+  const r=await fetch('/api/ng_xor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payload})});
+  document.getElementById('ngOut').textContent=JSON.stringify(await r.json(),null,2);
+};
+document.getElementById('goNgBcn').onclick=async()=>{
+  const ip=document.getElementById('ngBip').value, ts=document.getElementById('ngBts').value;
+  document.getElementById('ngOut').textContent='Running WGSL C2 periodicity sweep on Iris Xe...';
+  const r=await fetch('/api/ng_beacon',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,ts})});
+  document.getElementById('ngOut').textContent=JSON.stringify(await r.json(),null,2);
+};
+document.getElementById('goNgDga').onclick=async()=>{
+  const domains=document.getElementById('ngDga').value;
+  document.getElementById('ngOut').textContent='Scoring DGA & DNS-tunnel entropy on Iris Xe...';
+  const r=await fetch('/api/ng_dga',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains})});
+  document.getElementById('ngOut').textContent=JSON.stringify(await r.json(),null,2);
+};
 </script></body></html>"""
