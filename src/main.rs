@@ -1,4 +1,11 @@
+mod cortex_stdp;
 mod gpu;
+mod ja4;
+mod opsdeck;
+mod soc_loop;
+mod pty_term;
+mod spiderweb;
+mod tls_decrypt;
 
 use anyhow::{bail, Context, Result};
 use blake3::Hasher;
@@ -43,6 +50,15 @@ enum Cmd {
     },
     /// Start the persistent warm Vulkan GPU capability daemon on ~/.cas/vulkan.sock
     Broker,
+    /// Launch unified eBPF/XDP + STDP Cortex + JA4 + Autonomous SOC OpsDeck
+    Opsdeck {
+        #[arg(long, default_value = "wlo1")]
+        iface: String,
+        #[arg(long, default_value_t = 8095)]
+        port: u16,
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        llm: String,
+    },
     BenchGpu { #[arg(long, default_value_t = 262_144)] elements: u32, #[arg(long, default_value_t = 4096)] iters: u32, #[arg(long, default_value_t = 3)] runs: usize },
     /// Inspect recent versioned commits in the local semantic object graph
     Graph {
@@ -527,6 +543,7 @@ fn main() -> Result<()> {
             test_escape,
         } => cmd_run(hash, fuel, seed, caps, test_escape),
         Cmd::Broker => gpu::serve_broker(&cas_root()?.join("vulkan.sock")),
+        Cmd::Opsdeck { iface, port, llm } => opsdeck::run_opsdeck(iface, port, llm),
         Cmd::BenchGpu { elements, iters, runs } => gpu::bench_gpu(&cas_root()?.join("vulkan.sock"), elements, iters, runs),
         Cmd::Graph { limit } => cmd_graph(limit),
         Cmd::Worker {

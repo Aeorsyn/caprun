@@ -137,6 +137,7 @@ pre{background:#050811;border:1px solid #1e293b;padding:8px;border-radius:5px;fo
         <input id=ngBip value="203.0.113.42" style="width:120px" placeholder="Dest IP">
         <input id=ngBts value="0, 59.2, 121.1, 179.8, 240.5, 298.9, 361.0, 419.4" style="flex:1" placeholder="Timestamps (sec)">
         <button class=act id=goNgBcn>GPU C2 Beacon Hunt</button>
+        <button class=warn id=goNgLive>Live Outbound Sweep</button>
       </div>
       <div class=bar>
         <input id=ngDga value="github.com, cloudflare.com, xq9k2m7v4p1z.top, 4a6f686e2d657866696c2d3031.c2.bad.net" style="flex:1" placeholder="Comma-sep domains">
@@ -294,6 +295,12 @@ document.getElementById('goNgDga').onclick=async()=>{
   const domains=document.getElementById('ngDga').value;
   document.getElementById('ngOut').textContent='Scoring DGA & DNS-tunnel entropy on Iris Xe...';
   const r=await fetch('/api/ng_dga',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domains})});
+  document.getElementById('ngOut').textContent=JSON.stringify(await r.json(),null,2);
+};
+
+document.getElementById('goNgLive').onclick=async()=>{
+  document.getElementById('ngOut').textContent='Sweeping live outbound socket histories on Intel Iris Xe...';
+  const r=await fetch('/api/ng_live_beacons',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   document.getElementById('ngOut').textContent=JSON.stringify(await r.json(),null,2);
 };
 </script></body></html>"""

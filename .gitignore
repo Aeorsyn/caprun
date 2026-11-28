@@ -1,4 +1,5 @@
-/target
-.venv/
+/target/
+*.log
+*.pcap
+*.sock
 __pycache__/
-*.pyc

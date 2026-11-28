@@ -158,3 +158,53 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         "ok": True, "adapter": adapter, "gpu_ms": round(us / 1000.0, 2),
         "results": rows, "dnsmasq_sinkhole": "\n".join(sinkholes) or "# All tested domains clean.",
     }
+
+import threading
+
+OUTBOUND_TS = collections.defaultdict(lambda: collections.deque(maxlen=64))
+SEEN_SOCKS = {}
+OUTBOUND_LOCK = threading.Lock()
+IGNORE_IPS = {"", "*", "0.0.0.0", "::", "[::]", "127.0.0.1", "[::1]", "::1"}
+
+def record_outbound(ip, local_key=None):
+    ip = str(ip).strip("[]")
+    if ip in IGNORE_IPS:
+        return
+    now = time.time()
+    with OUTBOUND_LOCK:
+        if local_key:
+            prev = SEEN_SOCKS.get(local_key, 0.0)
+            if (now - prev) < 4.0:
+                SEEN_SOCKS[local_key] = now
+                return
+            SEEN_SOCKS[local_key] = now
+            if len(SEEN_SOCKS) > 2048:
+                cutoff = now - 10.0
+                for k in [k for k, v in SEEN_SOCKS.items() if v < cutoff]:
+                    del SEEN_SOCKS[k]
+        else:
+            q = OUTBOUND_TS[ip]
+            if q and (now - q[-1]) < 0.5:
+                return
+        OUTBOUND_TS[ip].append(round(now, 3))
+
+def live_beacon_scan(push_fn):
+    with OUTBOUND_LOCK:
+        snapshot = {ip: list(q) for ip, q in OUTBOUND_TS.items()}
+    ready = {ip: ts for ip, ts in snapshot.items() if len(ts) >= 4}
+    tracked = [{"ip": ip, "samples": len(ts)} for ip, ts in sorted(snapshot.items(), key=lambda kv: len(kv[1]), reverse=True)[:12]]
+    findings = []
+    for ip, ts in ready.items():
+        base = ts[0]
+        rel_csv = ", ".join(f"{t - base:.2f}" for t in ts)
+        res = gpu_beacon_hunt(rel_csv, ip, push_fn)
+        if res.get("ok"):
+            findings.append(res)
+    findings.sort(key=lambda r: r.get("jitter_pct", 999.0))
+    return {
+        "ok": True,
+        "tracked_destinations": tracked,
+        "evaluated": len(findings),
+        "beacons_detected": sum(1 for f in findings if f["verdict"] == "C2_BEACON_DETECTED"),
+        "findings": findings[:8],
+    }

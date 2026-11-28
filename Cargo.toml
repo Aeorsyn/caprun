@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+sha2 = "0.10"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
 anyhow = "1"
 blake3 = "1"
 bytemuck = { version = "1", features = ["derive"] }
@@ -17,3 +21,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wasmtime = "48"
 wgpu = "23"
+aya = "0.13"
+axum = { version = "0.8", features = ["ws"] }
+caprun-common = { path = "caprun-common" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }

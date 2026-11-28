@@ -113,14 +113,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     let m7 = (0x5be0cd19u + h) == {t[7]}u;
     out_buf[tid] = select(0.0, 1.0, m0 && m1 && m2 && m3 && m4 && m5 && m6 && m7);
 }}"""
-def _dispatch_wgsl(sock, elements, seed, total_ks, wgsl_hex):
+def _dispatch_wgsl(_sock, elements, seed, total_ks, wgsl_hex):
     msg = f"WGSL:{elements}:{seed}:{total_ks}:{wgsl_hex}\n".encode()
-    sock.sendall(msg)
-    buf = b""
-    while not buf.endswith(b"\n"):
-        ch = sock.recv(4096)
-        if not ch: break
-        buf += ch
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.connect(cortex.SOCK)
+        sock.sendall(msg)
+        buf = b""
+        while not buf.endswith(b"\n"):
+            ch = sock.recv(4096)
+            if not ch: break
+            buf += ch
     reply = buf.decode(errors="replace").strip()
     if not reply.startswith("OK:"):
         raise RuntimeError(reply)
@@ -160,23 +162,21 @@ def gpu_audit_keyspace(target_hex, mask, push_fn, max_candidates=4_194_304):
     recovered = None
     tested = 0
 
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.connect(cortex.SOCK)
-        zero_cs, _, adapter = _dispatch_wgsl(s, batch_sz, sweep_cap, sweep_cap, wgsl_hex)
-        for offset in range(0, sweep_cap, batch_sz):
-            cs, us, adapter = _dispatch_wgsl(s, batch_sz, offset, sweep_cap, wgsl_hex)
-            gpu_us_sum += us
-            end = min(sweep_cap, offset + batch_sz)
-            tested = end
-            if cs != zero_cs:
-                target_b = bytes.fromhex(target_hex)
-                for idx in range(offset, end):
-                    cand = decode_idx(idx, slots)
-                    if hashlib.sha256(cand.encode()).digest() == target_b:
-                        recovered = cand
-                        break
-                if recovered is not None:
+    zero_cs, _, adapter = _dispatch_wgsl(None, batch_sz, sweep_cap, sweep_cap, wgsl_hex)
+    for offset in range(0, sweep_cap, batch_sz):
+        cs, us, adapter = _dispatch_wgsl(None, batch_sz, offset, sweep_cap, wgsl_hex)
+        gpu_us_sum += us
+        end = min(sweep_cap, offset + batch_sz)
+        tested = end
+        if cs != zero_cs:
+            target_b = bytes.fromhex(target_hex)
+            for idx in range(offset, end):
+                cand = decode_idx(idx, slots)
+                if hashlib.sha256(cand.encode()).digest() == target_b:
+                    recovered = cand
                     break
+            if recovered is not None:
+                break
 
     wall_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     mhps = round(tested / max(1, gpu_us_sum), 2)

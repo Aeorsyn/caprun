@@ -1,0 +1,413 @@
+<!doctype html><html><head><meta charset=utf-8><title>caprun 10-tab opsdeck + chronovisor + iptraf-ng</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#070b14;color:#e2e8f0;font-family:monospace;display:flex;height:100vh;width:100vw;overflow:hidden}
+#leftCol{width:500px;min-width:300px;max-width:70vw;height:100vh;display:flex;flex-direction:column;padding:6px;background:#070b14;overflow:hidden}
+#vSplit{width:6px;cursor:col-resize;background:#1e293b;flex-shrink:0}
+#vSplit:hover,#vSplit.drag,.hSplit:hover,.hSplit.drag{background:#38bdf8}
+.hSplit{height:6px;cursor:row-resize;background:#1e293b;margin:3px 0;border-radius:3px;flex-shrink:0}
+.pane{display:flex;flex-direction:column;min-height:70px;overflow:hidden}
+.lbl{font-size:11px;color:#38bdf8;display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;flex-shrink:0}
+.lbl span{font-size:10px;color:#94a3b8}
+canvas{width:100%;height:100%;border:1px solid #334155;background:#020617;display:block}
+#cv{image-rendering:pixelated}
+#termOut{flex:1;background:#020617;border:1px solid #334155;border-radius:4px;padding:5px;overflow:auto;font-size:11px;line-height:1.22;white-space:pre-wrap;word-break:break-all;color:#cbd5e1;outline:none;cursor:text}
+#termOut:focus{border-color:#38bdf8}
+.right{flex:1;min-width:360px;padding:10px;overflow:auto;display:flex;flex-direction:column;gap:8px}
+.tabs{display:flex;flex-wrap:wrap;gap:5px;border-bottom:1px solid #1e293b;padding-bottom:8px}
+.tabs button{background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:5px 8px;cursor:pointer;font-family:monospace;font-size:11px}
+.tabs button.on{background:#0284c7;color:#fff;border-color:#38bdf8}
+.tab{display:none;flex-direction:column;gap:8px}.tab.on{display:flex}
+.card{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px}
+.bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+input,select,button{background:#020617;color:#e2e8f0;border:1px solid #334155;border-radius:5px;padding:4px 8px;font-family:monospace;font-size:11px}
+button{cursor:pointer} button.act{background:#0284c7;border-color:#38bdf8} button.warn{background:#b91c1c;border-color:#f87171}
+pre{background:#020617;border:1px solid #1e293b;padding:8px;border-radius:6px;max-height:220px;overflow:auto;font-size:11px;margin:4px 0 0;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse;font-size:11px} th,td{border-bottom:1px solid #1e293b;padding:3px 6px;text-align:left}
+h3{margin:0 0 6px;color:#38bdf8;font-size:12px}
+.kpiGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+.kpi{background:#020617;border:1px solid #1e293b;border-radius:6px;padding:6px 8px}
+.kpi b{display:block;font-size:15px;color:#38bdf8} .kpi span{font-size:10px;color:#94a3b8}
+.twoCol{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pBarWrap{background:#1e293b;height:7px;border-radius:4px;overflow:hidden;margin-top:2px}
+.pBar{height:100%;background:linear-gradient(90deg,#0284c7,#a855f7)}
+
+#chDrawer{display:none;background:#0b1120;border:1px solid #38bdf8;border-radius:6px;padding:7px;margin-top:4px;font-size:11px;max-height:210px;overflow:auto}
+#chDrawer.open{display:block}
+#chDrawer pre{max-height:95px;margin:4px 0 0;font-size:10px}
+#chv{cursor:pointer}
+</style></head><body>
+
+<div id=leftCol>
+  <div id=pCortex class=pane style="flex:0 0 24%">
+    <div class=lbl><b>CORTEX 1: 262k STDP</b><span id=stat>connecting...</span></div>
+    <div style="flex:1;min-height:0"><canvas id=cv width=512 height=512></canvas></div>
+  </div>
+  <div class=hSplit data-top="pCortex" data-bot="pChrono" title="Drag to resize Cortex / Chronovisor"></div>
+
+  <div id=pChrono class=pane style="flex:0 0 52%">
+    <div class=lbl>
+      <b>CORTEX 2: CHRONOVISOR (WIRE LENS)</b>
+      <span><span id=chInfo>listening...</span> <button onclick="resetLayout()" style="padding:1px 5px;font-size:10px;margin-left:4px">Reset Layout</button></span>
+    </div>
+    <div style="flex:1;min-height:0;position:relative"><canvas id=chv width=640 height=420 title="Click any line to expand packet inspector"></canvas></div>
+    <div id=chDrawer>
+      <div class=bar style="justify-content:space-between;margin-bottom:4px">
+        <b id=chDrTitle style="color:#38bdf8">Packet Lens</b>
+        <button onclick="chDrawer.classList.remove('open')" style="padding:1px 6px;font-size:10px">Close</button>
+      </div>
+      <div id=chDrMeta style="color:#94a3b8;font-size:10px;margin-bottom:4px"></div>
+      <div class=bar>
+        <button class=act id=chBtnRecon>Reconstruct Flow</button>
+        <button class=warn id=chBtnXor>GPU XOR + YARA</button>
+        <button id=chBtnLlm style="border-color:#a855f7;color:#e9d5ff">Ask Local LLM</button>
+        <button class=warn id=chBtnDrop>XDP_DROP IP</button>
+      </div>
+      <pre id=chDrOut></pre>
+    </div>
+  </div>
+  <div class=hSplit data-top="pChrono" data-bot="pTerm" title="Drag to resize Chronovisor / Bash PTY"></div>
+
+  <div id=pTerm class=pane style="flex:1 1 20%">
+    <div class=lbl>
+      <b>LOCAL BASH PTY</b>
+      <span><button onclick="sendKey('\x03')" style="padding:1px 5px;font-size:10px">Ctrl+C</button> <button onclick="termOut.textContent=''" style="padding:1px 5px;font-size:10px">Clear</button></span>
+    </div>
+    <div id=termOut tabindex="0" title="Click and type for interactive bash">Connecting /ws/term...</div>
+  </div>
+</div>
+
+<div id=vSplit title="Drag to resize monitor column"></div>
+
+<div class=right>
+  <div class=tabs id=tabBar>
+    <button data-t="kern" class=on>1. XDP + STDP + SOC</button>
+    <button data-t="recon">2. Recon</button>
+    <button data-t="gpu">3. GPU Keyspace</button>
+    <button data-t="for">4. Forensics</button>
+    <button data-t="off">5. Web/TLS</button>
+    <button data-t="def">6. Canaries</button>
+    <button data-t="ba">7. BlackArch+MSF</button>
+    <button data-t="jtr">8. JtR + KDF</button>
+    <button data-t="ng">9. Silicon Lab</button>
+    <button data-t="sw" style="border-color:#a855f7;color:#e9d5ff">10. Spiderweb + iptraf</button>
+  </div>
+
+  <div id=t_kern class="tab on">
+    <div class=card><h3>Zero-Copy eBPF/XDP Kernel Shield</h3>
+      <div class=bar><input id=blkIp value="203.0.113.42"><button class=warn onclick="jpost('/api/xdp/block',{ip:blkIp.value},xdpOut)">Arm XDP_DROP</button><button onclick="jpost('/api/xdp/unblock',{ip:blkIp.value},xdpOut)">Release</button><button class=act onclick="jget('/api/status',xdpOut)">Refresh</button></div>
+      <pre id=xdpOut>Loading...</pre></div>
+    <div class=card><h3>Persistent STDP Plasticity (262k VRAM Weights)</h3>
+      <div class=bar><button class=act onclick="jpost('/api/stdp/save',{},stdpOut)">Save baseline.bin</button><button onclick="jpost('/api/stdp/load',{},stdpOut)">Load</button><button class=warn onclick="jpost('/api/stdp/diff',{},stdpOut)">Diff Live vs Baseline</button></div>
+      <pre id=stdpOut>STDP synaptic weights live in VRAM.</pre></div>
+    <div class=card><h3>Encrypted-Traffic JA4 + Air-Gapped Autonomous SOC</h3>
+      <div class=bar><input id=ja4Ip value="10.0.0.55" style="width:110px"><input id=ja4Hex style="flex:1" placeholder="TLS ClientHello hex (blank = TLS 1.3 sample)"><button class=act onclick="jpost('/api/ja4',{ip:ja4Ip.value,hex:ja4Hex.value},socOut)">JA4 -> Cortex</button></div>
+      <div class=bar style="margin-top:6px"><input id=socIp value="203.0.113.42" style="width:120px"><button class=warn onclick="jpost('/api/soc/triage',{ip:socIp.value,enforce:true},socOut)">Run Local LLM Triage + XDP Enforce</button></div>
+      <pre id=socOut>JA4 &amp; Autonomous SOC ready.</pre></div>
+  </div>
+
+  <div id=t_recon class="tab">
+    <div class=bar><input id=rHost value="127.0.0.1" style="width:140px"><input id=rPorts value="22,80,443,8080,8095,8096" style="flex:1"><button class=act onclick="jpost('/api/scan',{host:rHost.value,ports:rPorts.value},reconOut)">TCP Banner Scan</button></div>
+    <pre id=reconOut>Multi-threaded TCP + banner scanner ready.</pre>
+  </div>
+
+  <div id=t_gpu class="tab">
+    <div class=bar><input id=gTh value="262144" style="width:90px"><input id=gRd value="512" style="width:70px"><button class=act onclick="jpost('/api/gpu_audit',{threads:+gTh.value,rounds:+gRd.value,seed:42,poison:false},gpuOut)">Dispatch Iris Xe WGSL</button><button class=warn onclick="jpost('/api/gpu_audit',{threads:+gTh.value,rounds:+gRd.value,seed:42,poison:true},gpuOut)">Test Poisoned WGSL</button></div>
+    <pre id=gpuOut>Vulkan broker compute audit ready.</pre></div>
+
+  <div id=t_for class="tab">
+    <div class=bar><button class=act onclick="jget('/api/graph',forOut)">Refresh ~/.cas/graph.db Provenance</button></div>
+    <pre id=forOut>Click Refresh to inspect provenance commits.</pre></div>
+
+  <div id=t_off class="tab">
+    <div class=bar><input id=wUrl value="http://127.0.0.1:8095" style="flex:1"><button class=act onclick="jpost('/api/web_fuzz',{url:wUrl.value,paths:''},offOut)">Web Fuzz &amp; Headers</button></div>
+    <div class=bar><input id=tHost value="github.com" style="flex:1"><input id=tPort value="443" style="width:70px"><button class=act onclick="jpost('/api/tls_audit',{host:tHost.value,port:+tPort.value},offOut)">TLS &amp; DNS Audit</button></div>
+    <pre id=offOut>Web fuzzing and TLS/DNS auditing ready.</pre></div>
+
+  <div id=t_def class="tab">
+    <div class=bar><input id=cPort value="2222" style="width:80px"><input id=cName value="ssh_decoy" style="width:120px"><button class=warn onclick="jpost('/api/canary',{port:+cPort.value,name:cName.value},defOut)">Arm Decoy Canary</button><button class=act onclick="jget('/api/threats',defOut)">View Threat Rules</button></div>
+    <pre id=defOut>Deception canaries + firewall rules ready.</pre></div>
+
+  <div id=t_ba class="tab">
+    <div class=bar><input id=baTgt value="127.0.0.1" style="width:140px"><select id=baCat><option value="all">All</option><option value="caprun">caprun</option><option value="recon">recon</option><option value="web">web</option><option value="exploit">exploit</option><option value="sniff">sniff</option><option value="crack">crack</option></select><button onclick="loadBA()">Refresh</button></div>
+    <div id=baGrid class=bar style="max-height:110px;overflow:auto"></div>
+    <div class=bar><span id=msfP style="color:#f472b6">msf6 &gt;</span><input id=msfIn style="flex:1" placeholder="help | search | use <mod> | set RHOSTS 127.0.0.1 | run"><button class=act onclick="sendMSF()">Exec</button></div>
+    <pre id=msfOut>BlackArch + Metasploit console ready.</pre></div>
+
+  <div id=t_jtr class="tab">
+    <div class=bar><input id=jPw value="flint26" style="width:110px"><button onclick="genH()">Hash Target</button><input id=jMask value="flint?d?d" style="width:120px"><button class=warn onclick="runJtr()">Iris Xe Frequency Sweep</button><button class=act onclick="jpost('/api/kdf_bench',{gpu_mhps:150,len:8,charset:36},jtrOut)">KDF Bench</button></div>
+    <div class=bar><input id=jHash style="flex:1" placeholder="64-char SHA-256 hex digest"></div>
+    <pre id=jtrOut>Frequency-ranked WGSL JtR + scrypt hardening ready.</pre></div>
+
+  <div id=t_ng class="tab">
+    <div class=bar><input id=ngXor value="hex:2a363632786d6d21706c202330296c2d27366d202723212d2c" style="flex:1"><button class=warn onclick="jpost('/api/ng_xor',{payload:ngXor.value},ngOut)">GPU XOR + YARA</button></div>
+    <div class=bar><input id=ngBip value="203.0.113.42" style="width:115px"><input id=ngBts value="0, 59.2, 121.1, 179.8, 240.5, 298.9, 361.0, 419.4" style="flex:1"><button class=act onclick="jpost('/api/ng_beacon',{ip:ngBip.value,ts:ngBts.value},ngOut)">GPU C2 Beacon</button><button class=warn onclick="jpost('/api/ng_live_beacons',{},ngOut)">Live Outbound Sweep</button></div>
+    <div class=bar><input id=ngDga value="github.com, cloudflare.com, xq9k2m7v4p1z.top, 4a6f686e2d657866696c2d3031.c2.bad.net" style="flex:1"><button class=act onclick="jpost('/api/ng_dga',{domains:ngDga.value},ngOut)">GPU DGA / Tunnel</button></div>
+    <pre id=ngOut>Silicon Lab ready.</pre></div>
+
+  <div id=t_sw class="tab">
+    <div class=card>
+      <div class=bar style="justify-content:space-between;margin-bottom:6px">
+        <h3 style="margin:0">IPTRAF-NG RETHOUGHT (LIVE WIRE TELEMETRY)</h3>
+        <div class=bar>
+          <button class=act id=iptPause onclick="toggleIpt()">Pause Live</button>
+          <button onclick="loadSW();loadIptraf()">Refresh Now</button>
+        </div>
+      </div>
+      <div class=kpiGrid>
+        <div class=kpi><b id=kPps>0.0</b><span>Packets / sec</span></div>
+        <div class=kpi><b id=kKbps>0.0 KB/s</b><span>Throughput</span></div>
+        <div class=kpi><b id=kTot>0</b><span>Total Packets</span></div>
+        <div class=kpi><b id=kFlows>0</b><span>Active Flows</span></div>
+      </div>
+      <canvas id=iptSpark width=600 height=46 style="height:46px;margin-bottom:8px;border-radius:4px"></canvas>
+      <div class=twoCol>
+        <div>
+          <div style="font-size:10px;color:#94a3b8;margin-bottom:4px">PROTOCOL BREAKDOWN &amp; PACKET SIZE HISTOGRAM</div>
+          <div id=iptProtos style="font-size:11px"></div>
+          <div id=iptSizes style="font-size:10px;color:#94a3b8;margin-top:6px"></div>
+        </div>
+        <div>
+          <div style="font-size:10px;color:#94a3b8;margin-bottom:4px">TOP TALKERS (ONE-CLICK XDP CONTAINMENT)</div>
+          <table><thead><tr><th>Remote IP</th><th>Pkts</th><th>Bytes</th><th>%</th><th>Shield</th></tr></thead><tbody id=iptTalkers></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <div class=card>
+      <div class=bar style="justify-content:space-between;margin-bottom:6px">
+        <h3 style="margin:0">SPIDERWEB: CAUGHT FLOWS &amp; RECONSTRUCTOR</h3>
+        <button class=act onclick="loadSW()">Refresh Flows</button>
+      </div>
+      <div style="max-height:175px;overflow:auto;border:1px solid #1e293b;border-radius:6px">
+        <table><thead><tr><th>ID</th><th>Proto</th><th>Source -&gt; Dest</th><th>Bytes</th><th>H</th><th>Intel (SNI/DNS/JA4)</th><th>Action</th></tr></thead><tbody id=swBody></tbody></table>
+      </div>
+      <div id=swImgWrap style="margin-top:6px"></div>
+      <pre id=swOut>Select any caught flow above and click Reconstruct to rebuild the payload + hex dump.</pre>
+    </div>
+  </div>
+</div>
+
+<script>
+// --- Resizable Layout with Persisted Defaults ---
+const DEF_LAYOUT={leftW:500,c1:24,c2:54};
+function applyLayout(L){
+  leftCol.style.width=L.leftW+'px';
+  pCortex.style.flex=`0 0 ${L.c1}%`;
+  pChrono.style.flex=`0 0 ${L.c2}%`;
+  pTerm.style.flex=`1 1 ${Math.max(12,100-L.c1-L.c2)}%`;
+}
+function saveLayout(){
+  const h=leftCol.clientHeight||1;
+  const L={
+    leftW:Math.round(leftCol.getBoundingClientRect().width),
+    c1:Math.round((pCortex.getBoundingClientRect().height/h)*100),
+    c2:Math.round((pChrono.getBoundingClientRect().height/h)*100)
+  };
+  localStorage.setItem('caprun_layout',JSON.stringify(L));
+}
+window.resetLayout=()=>{ localStorage.removeItem('caprun_layout'); applyLayout(DEF_LAYOUT); };
+try{ applyLayout(JSON.parse(localStorage.getItem('caprun_layout'))||DEF_LAYOUT); }catch{ applyLayout(DEF_LAYOUT); }
+
+// Horizontal splitter (Left Monitors <-> Right OpsDeck)
+vSplit.onmousedown=(e)=>{
+  e.preventDefault(); vSplit.classList.add('drag');
+  const mv=(ev)=>{ leftCol.style.width=Math.max(300,Math.min(window.innerWidth*0.7,ev.clientX))+'px'; };
+  const up=()=>{ vSplit.classList.remove('drag'); window.removeEventListener('mousemove',mv); window.removeEventListener('mouseup',up); saveLayout(); };
+  window.addEventListener('mousemove',mv); window.addEventListener('mouseup',up);
+};
+// Vertical splitters (Cortex 1 <-> Chronovisor <-> Bash PTY)
+document.querySelectorAll('.hSplit').forEach(bar=>{
+  bar.onmousedown=(e)=>{
+    e.preventDefault(); bar.classList.add('drag');
+    const topEl=document.getElementById(bar.dataset.top), botEl=document.getElementById(bar.dataset.bot);
+    const y0=e.clientY, hTop=topEl.getBoundingClientRect().height, hBot=botEl.getBoundingClientRect().height, tot=leftCol.clientHeight||1;
+    const mv=(ev)=>{
+      const dy=ev.clientY-y0;
+      const nt=Math.max(85,Math.min(hTop+hBot-85,hTop+dy)), nb=hTop+hBot-nt;
+      topEl.style.flex=`0 0 ${(nt/tot)*100}%`;
+      botEl.style.flex=(botEl.id==='pTerm')?`1 1 ${(nb/tot)*100}%`:`0 0 ${(nb/tot)*100}%`;
+    };
+    const up=()=>{ bar.classList.remove('drag'); window.removeEventListener('mousemove',mv); window.removeEventListener('mouseup',up); saveLayout(); };
+    window.addEventListener('mousemove',mv); window.addEventListener('mouseup',up);
+  };
+});
+
+// --- Cortex 1: 512x512 STDP Binary WebSocket ---
+const ctx=cv.getContext('2d'), img=ctx.createImageData(512,512);
+const ws=new WebSocket(`ws://${location.host}/ws/cortex`); ws.binaryType='arraybuffer';
+ws.onmessage=(e)=>{ if(typeof e.data==='string'){stat.textContent=e.data;return;} img.data.set(new Uint8Array(e.data)); ctx.putImageData(img,0,0); };
+
+// --- Cortex 2: High-Detail Split Chronovisor (Spectrum Waterfall + Packet Decode Lens) ---
+const c2=chv.getContext('2d'), CW=chv.width, CH=chv.height, ROW=13, SPEC_W=260, chRows=[];
+c2.fillStyle='#020617'; c2.fillRect(0,0,CW,CH);
+const ws2=new WebSocket(`ws://${location.host}/ws/chrono`);
+ws2.onmessage=(e)=>{
+  const d=JSON.parse(e.data);
+  chRows.unshift(d); if(chRows.length>Math.ceil(CH/ROW)) chRows.pop();
+  chInfo.textContent=`${d.proto} ${d.flags||''} ${d.len}B H=${d.entropy}`;
+  // Scroll entire high-res canvas down by ROW px
+  c2.drawImage(chv,0,0,CW,CH-ROW,0,ROW,CW,CH-ROW);
+  c2.fillStyle='#020617'; c2.fillRect(0,0,CW,ROW);
+  const hue=d.proto==='HTTP'?135:d.proto==='TLS'?195:d.proto==='DNS'?45:d.proto==='SSH'?25:d.entropy>6.5?300:220;
+  // Left half: 64-byte raw spectrum + entropy bar
+  const pv=d.preview&&d.preview.length?d.preview:[40,90,140,200];
+  const step=(SPEC_W-8)/pv.length;
+  for(let i=0;i<pv.length;i++){
+    const lum=Math.min(78,18+Math.round(pv[i]/3.8));
+    c2.fillStyle=`hsl(${hue},92%,${lum}%)`;
+    c2.fillRect(i*step,1,Math.ceil(step),ROW-2);
+  }
+  // Divider + Entropy pip
+  c2.fillStyle='#1e293b'; c2.fillRect(SPEC_W-4,0,2,ROW);
+  // Right half: Crisp packet lens (Proto | Flags | Dest | Len | ASCII peek)
+  c2.font='10px monospace';
+  c2.fillStyle=`hsl(${hue},95%,68%)`;
+  c2.fillText(`${d.proto.padEnd(4)} ${(d.flags||'').padEnd(3)}`,SPEC_W+2,10);
+  c2.fillStyle='#cbd5e1';
+  const ep=`${d.dst} (${d.len}B)`.slice(0,26);
+  c2.fillText(ep,SPEC_W+56,10);
+  c2.fillStyle='#64748b';
+  c2.fillText((d.ascii||'').slice(0,22),SPEC_W+224,10);
+};
+
+
+// --- Expandable Chronovisor Row Inspector ---
+chv.onclick=(e)=>{
+  const rect=chv.getBoundingClientRect();
+  const yCanvas=((e.clientY-rect.top)/rect.height)*CH;
+  const idx=Math.floor(yCanvas/ROW);
+  const row=chRows[idx];
+  if(!row) return;
+  const hex=(row.preview||[]).map(b=>b.toString(16).padStart(2,'0')).join('');
+  const cls=row.entropy>7.2?'ENCRYPTED / COMPRESSED':row.entropy>4.8?'OBFUSCATED / BINARY':'CLEARTEXT / STRUCTURED';
+  chDrTitle.textContent=`[${row.proto} ${row.flags||''}] ${row.src} -> ${row.dst}`;
+  chDrMeta.textContent=`Flow #${row.flow_id||'?'} | ${row.len} bytes | Shannon H=${row.entropy} (${cls})`;
+  chDrOut.textContent=`ASCII: ${row.ascii||'(none)'}\nHEX  : ${hex.match(/.{1,2}/g)?.join(' ')||'(empty)'}`;
+  chDrawer.classList.add('open');
+
+  chBtnRecon.onclick=()=>{
+    document.querySelector('[data-t="sw"]').click();
+    if(row.flow_id) recon(row.flow_id);
+  };
+  chBtnXor.onclick=async()=>{
+    chDrOut.textContent='Sweeping packet payload on Intel Iris Xe (XOR + YARA)...';
+    const r=await fetch('/api/ng_xor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payload:'hex:'+hex})});
+    chDrOut.textContent=JSON.stringify(await r.json(),null,2);
+  };
+  chBtnLlm.onclick=async()=>{
+    chDrOut.textContent='Querying local llama-server (:8080)...';
+    const ctx=`Proto=${row.proto} Flags=${row.flags} ${row.src}->${row.dst} Len=${row.len}B Entropy=${row.entropy} ASCII="${row.ascii}" HEX=${hex}`;
+    const r=await fetch('/api/llm/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({context:ctx})});
+    const d=await r.json();
+    chDrOut.textContent=d.ok?d.reply:d.error;
+  };
+  chBtnDrop.onclick=async()=>{
+    const ip=row.dst.split(':')[0];
+    const r=await fetch('/api/xdp/block',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip})});
+    chDrOut.textContent=JSON.stringify(await r.json(),null,2);
+  };
+};
+
+// --- Interactive Local Bash PTY ---
+let wsTerm;
+function stripAnsi(s){ return s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g,'').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g,'').replace(/\r\n/g,'\n'); }
+function connectTerm(){
+  wsTerm=new WebSocket(`ws://${location.host}/ws/term`);
+  wsTerm.onopen=()=>{ termOut.textContent=''; };
+  wsTerm.onmessage=(e)=>{
+    for(const ch of stripAnsi(e.data)){
+      if(ch==='\x08') termOut.textContent=termOut.textContent.slice(0,-1);
+      else if(ch!=='\r') termOut.textContent+=ch;
+    }
+    if(termOut.textContent.length>18000) termOut.textContent=termOut.textContent.slice(-14000);
+    termOut.scrollTop=termOut.scrollHeight;
+  };
+  wsTerm.onclose=()=>{ termOut.textContent+='\n[session closed — reload to reconnect]'; };
+}
+window.sendKey=(k)=>{ if(wsTerm&&wsTerm.readyState===1) wsTerm.send(k); termOut.focus(); };
+termOut.addEventListener('keydown',(e)=>{
+  if(!wsTerm||wsTerm.readyState!==1) return;
+  if(e.ctrlKey&&e.key.length===1){
+    const c=e.key.toLowerCase().charCodeAt(0)-96;
+    if(c>=1&&c<=26){ e.preventDefault(); wsTerm.send(String.fromCharCode(c)); return; }
+  }
+  const map={Enter:'\r',Backspace:'\x7f',Tab:'\t',Escape:'\x1b',ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowRight:'\x1b[C',ArrowLeft:'\x1b[D'};
+  if(map[e.key]){ e.preventDefault(); wsTerm.send(map[e.key]); }
+  else if(e.key.length===1&&!e.altKey&&!e.metaKey){ e.preventDefault(); wsTerm.send(e.key); }
+});
+connectTerm();
+
+// --- Tabs & Tool Helpers ---
+let swTimer=null, iptLive=true, sparkPts=[];
+tabBar.onclick=(e)=>{
+  if(!e.target.dataset.t) return;
+  document.querySelectorAll('.tabs button,.tab').forEach(x=>x.classList.remove('on'));
+  e.target.classList.add('on');
+  document.getElementById('t_'+e.target.dataset.t).classList.add('on');
+  if(e.target.dataset.t==='sw'){
+    loadSW(); loadIptraf();
+    if(!swTimer) swTimer=setInterval(()=>{ if(iptLive&&document.getElementById('t_sw').classList.contains('on')) loadIptraf(); },1000);
+  }
+};
+window.toggleIpt=()=>{ iptLive=!iptLive; iptPause.textContent=iptLive?'Pause Live':'Resume Live'; };
+async function jget(u,el){ el.textContent='Loading...'; const r=await fetch(u); el.textContent=JSON.stringify(await r.json(),null,2); }
+async function jpost(u,b,el){ el.textContent='Running...'; const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); el.textContent=JSON.stringify(await r.json(),null,2); }
+
+// --- iptraf-ng Rethought Renderer ---
+function fmtB(b){ return b>1048576?(b/1048576).toFixed(1)+'M':b>1024?(b/1024).toFixed(1)+'K':b+'B'; }
+async function loadIptraf(){
+  const r=await fetch('/api/spiderweb/iptraf'); const d=await r.json();
+  kPps.textContent=d.pps.toFixed(1);
+  kKbps.textContent=d.kbps.toFixed(1)+' KB/s';
+  kTot.textContent=d.total_pkts.toLocaleString();
+  kFlows.textContent=d.active_flows;
+
+  sparkPts.push(d.kbps); if(sparkPts.length>60) sparkPts.shift();
+  const sc=iptSpark.getContext('2d'), sw=iptSpark.width, sh=iptSpark.height;
+  sc.fillStyle='#020617'; sc.fillRect(0,0,sw,sh);
+  const mx=Math.max(5,...sparkPts);
+  sc.strokeStyle='#38bdf8'; sc.lineWidth=1.5; sc.beginPath();
+  sparkPts.forEach((v,i)=>{ const x=(i/59)*sw, y=sh-4-(v/mx)*(sh-10); i?sc.lineTo(x,y):sc.moveTo(x,y); });
+  sc.stroke();
+
+  iptProtos.innerHTML=(d.protos||[]).slice(0,5).map(p=>`<div style="margin-bottom:4px"><div style="display:flex;justify-content:space-between"><b>${p.proto}</b><span>${p.pkts} pkts | ${fmtB(p.bytes)} (${p.share_pct}%)</span></div><div class=pBarWrap><div class=pBar style="width:${Math.min(100,p.share_pct)}%"></div></div></div>`).join('')||'Waiting for packets...';
+  const sb=d.size_buckets||[0,0,0,0,0];
+  iptSizes.textContent=`Size Buckets: <=64B:${sb[0]} | 65-256B:${sb[1]} | 257-1024B:${sb[2]} | 1K-1.5K:${sb[3]} | >1.5K:${sb[4]}`;
+
+  iptTalkers.innerHTML=(d.top_talkers||[]).map(t=>`<tr><td>${t.ip}</td><td>${t.pkts}</td><td>${fmtB(t.bytes)}</td><td>${t.share_pct}%</td><td><button class=warn style="padding:1px 5px;font-size:10px" onclick="blockTalker('${t.ip}')">XDP_DROP</button></td></tr>`).join('');
+}
+window.blockTalker=async(ip)=>{
+  const r=await fetch('/api/xdp/block',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip})});
+  const d=await r.json(); swOut.textContent=JSON.stringify(d,null,2);
+};
+
+// --- BlackArch, JtR, Spiderweb Flows ---
+let BA=[];
+async function loadBA(){ const r=await fetch('/api/ba_list'); BA=await r.json(); renderBA(); }
+function renderBA(){ const c=baCat.value; baGrid.innerHTML=BA.filter(t=>c==='all'||t.cat===c).map(t=>`<button title="${t.desc}" style="opacity:${t.installed?1:0.45}" onclick="runBA('${t.id}')">[${t.cat}] ${t.id}</button>`).join(''); }
+window.runBA=async(id)=>{ msfOut.textContent=`Running ${id}...`; const r=await fetch('/api/ba_run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,target:baTgt.value.trim()})}); const d=await r.json(); msfOut.textContent=`[${id} | ${d.ms||0}ms]\n`+d.output; };
+async function sendMSF(){ const cmd=msfIn.value.trim(); if(!cmd)return; msfIn.value=''; const r=await fetch('/api/msf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})}); const d=await r.json(); msfP.textContent=`msf6 (${d.prompt.split('/').pop()}) >`; msfOut.textContent=`$ ${cmd}\n`+d.output; }
+msfIn.onkeydown=(e)=>{ if(e.key==='Enter') sendMSF(); }; baCat.onchange=renderBA;
+async function genH(){ const r=await fetch('/api/hash_gen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pw:jPw.value})}); jHash.value=(await r.json()).sha256; }
+async function runJtr(){ if(!jHash.value) await genH(); jpost('/api/jtr_sweep',{hash:jHash.value.trim(),mask:jMask.value.trim()},jtrOut); }
+async function loadSW(){
+  const r=await fetch('/api/spiderweb/flows'); const d=await r.json();
+  swBody.innerHTML=(d.flows||[]).map(f=>`<tr><td>${f.id}</td><td><b>${f.proto}</b></td><td>${f.src} -&gt; ${f.dst}</td><td>${f.bytes}</td><td>${f.entropy}</td><td>${f.sni||f.dns_q||f.ja4||f.snippet.slice(0,24)}</td><td><button class=warn onclick="recon(${f.id})">Reconstruct</button></td></tr>`).join('');
+}
+window.recon=async(id)=>{
+  swImgWrap.innerHTML=''; swOut.textContent='Reconstructing captured flow...';
+  const r=await fetch('/api/spiderweb/reconstruct',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  const d=await r.json();
+  if(!d.ok){ swOut.textContent=d.error; return; }
+  const rec=d.reconstruction;
+  if(rec.data_uri){ swImgWrap.innerHTML=`<img src="${rec.data_uri}" style="max-width:100%;max-height:220px;border:1px solid #38bdf8;border-radius:6px">`; }
+  else if(rec.artifact_type==='HTTP_EXCHANGE' && rec.text_view.includes('<html')){
+    const htmlPart=rec.text_view.slice(rec.text_view.indexOf('<html'));
+    const ifr=document.createElement('iframe'); ifr.sandbox=''; ifr.style.cssText='width:100%;height:220px;background:#fff;border:1px solid #38bdf8;border-radius:6px';
+    ifr.srcdoc=htmlPart; swImgWrap.appendChild(ifr);
+  }
+  swOut.textContent=`=== ${rec.artifact_type} (${rec.proto} | ${rec.bytes}B | H=${rec.entropy}) ===\n${rec.src} -> ${rec.dst}\n\n${rec.text_view}\n\n--- HEX DUMP ---\n${rec.hex_dump}`;
+};
+jget('/api/status',xdpOut); loadBA(); genH();
+</script></body></html>
