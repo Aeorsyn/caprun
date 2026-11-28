@@ -36,6 +36,18 @@ h3{margin:0 0 6px;color:#38bdf8;font-size:12px}
 #chDrawer.open{display:block}
 #chDrawer pre{max-height:95px;margin:4px 0 0;font-size:10px}
 #chv{cursor:pointer}
+
+#vpnPill{position:fixed;top:8px;right:14px;z-index:9998;display:flex;align-items:center;gap:8px;background:#0b1120;border:1px solid #334155;border-radius:999px;padding:5px 12px;font-size:11px;color:#e2e8f0;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.45);user-select:none}
+#vpnPill:hover{border-color:#38bdf8}
+#vpnDot{width:8px;height:8px;border-radius:50%;background:#64748b;display:inline-block}
+#vpnDrawer{position:fixed;top:0;right:-450px;width:430px;max-width:94vw;height:100vh;z-index:9999;background:#090e1a;border-left:1px solid #38bdf8;box-shadow:-10px 0 30px rgba(0,0,0,.65);transition:right .22s ease;display:flex;flex-direction:column;font-size:11px;color:#e2e8f0}
+#vpnDrawer.open{right:0}
+.vpn-hd{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #1e293b;background:#0f172a}
+.vpn-body{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.vpn-card{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:9px}
+.vpn-row{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:5px 0;border-top:1px solid #1e293b}
+.vpn-row:first-child{border-top:none}
+#vpnQrBox svg{background:#fff;border-radius:6px;padding:6px;max-width:220px;height:auto;display:block;margin:6px auto}
 </style></head><body>
 
 <div id=leftCol>
@@ -433,4 +445,253 @@ window.recon=async(id)=>{
   swOut.textContent=`=== ${rec.artifact_type} (${rec.proto} | ${rec.bytes}B | H=${rec.entropy}) ===\n${rec.src} -> ${rec.dst}\n\n${rec.text_view}\n\n--- HEX DUMP ---\n${rec.hex_dump}`;
 };
 jget('/api/status',xdpOut); loadBA(); genH();
-</script></body></html>
+</script>
+<!-- Persistent Global VPN Status Pill -->
+<div id=vpnPill onclick="toggleVpnDrawer()" title="Open caprun WireGuard Tunnel Drawer">
+  <span id=vpnDot></span>
+  <b id=vpnPillTxt>VPN: OFF</b>
+  <span id=vpnPillSub style="color:#94a3b8"></span>
+</div>
+
+<!-- Slide-Over WireGuard Tunnel Drawer -->
+<div id=vpnDrawer>
+  <div class=vpn-hd>
+    <div>
+      <b style="color:#38bdf8;font-size:13px">WireGuard Tunnel Control</b>
+      <div id=vpnToolsInfo style="font-size:10px;color:#94a3b8">Checking wg / awg...</div>
+    </div>
+    <button onclick="toggleVpnDrawer(false)" style="padding:3px 9px">Close</button>
+  </div>
+
+  <div class=vpn-body>
+    <!-- Easy Mode: Live Status & Kill-Switch -->
+    <div class=vpn-card>
+      <div class=bar style="justify-content:space-between">
+        <span id=vpnLiveBadge style="font-weight:bold;color:#94a3b8">DISCONNECTED</span>
+        <div class=bar style="gap:5px">
+          <button onclick="checkExitIp()" style="padding:2px 7px;font-size:10px">Exit IP</button>
+          <button id=vpnKsBtn onclick="toggleKillSwitch()" style="padding:2px 7px;font-size:10px;border-color:#f59e0b;color:#fde68a">Kill-Switch: OFF</button>
+        </div>
+      </div>
+      <div id=vpnExitIp style="font-size:10px;color:#38bdf8;margin-top:4px">Exit IP: (click Exit IP to query)</div>
+      <div id=vpnActiveStats style="font-size:10px;color:#cbd5e1;margin-top:4px"></div>
+    </div>
+
+    <!-- Easy Mode: Saved Profiles -->
+    <div class=vpn-card>
+      <div class=bar style="justify-content:space-between;margin-bottom:4px">
+        <b style="color:#e2e8f0">Saved Profiles</b>
+        <label style="border:1px solid #38bdf8;border-radius:4px;padding:2px 7px;cursor:pointer;font-size:10px;color:#38bdf8">
+          + Upload .conf
+          <input type=file accept=".conf,.txt" style="display:none" onchange="uploadVpnConf(this)">
+        </label>
+      </div>
+      <div id=vpnProfiles><span style="color:#64748b">No profiles saved yet. Upload or paste a WireGuard .conf below.</span></div>
+    </div>
+
+    <!-- Easy Mode: Quick Paste .conf -->
+    <details class=vpn-card>
+      <summary style="cursor:pointer;color:#38bdf8;font-weight:bold">Paste WireGuard .conf Profile</summary>
+      <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px">
+        <input id=vpnProfName placeholder="Profile / interface name (e.g. mullvad, wg0)" style="width:100%">
+        <textarea id=vpnProfBody rows=5 placeholder="[Interface]
+PrivateKey = ...
+Address = 10.64.0.2/32
+
+[Peer]
+PublicKey = ...
+Endpoint = 1.2.3.4:51820
+AllowedIPs = 0.0.0.0/0" style="width:100%;font-family:monospace;font-size:10px;background:#020617;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:5px"></textarea>
+        <button class=act onclick="savePastedVpn()">Save Profile (0600)</button>
+      </div>
+    </details>
+
+    <!-- Detailed Mode: Live Handshake Telemetry -->
+    <details class=vpn-card open>
+      <summary style="cursor:pointer;color:#10b981;font-weight:bold">Detailed: Live Handshake Telemetry</summary>
+      <div id=vpnTelemetry style="margin-top:6px;font-size:10px;color:#94a3b8">No active WireGuard interfaces.</div>
+    </details>
+
+    <!-- Detailed Mode: Mobile Peer & Offline SVG QR Generator -->
+    <details class=vpn-card>
+      <summary style="cursor:pointer;color:#a855f7;font-weight:bold">Detailed: Mobile Peer &amp; QR Generator</summary>
+      <div style="margin-top:6px;display:flex;flex-direction:column;gap:5px">
+        <input id=qrEp placeholder="Server Endpoint (e.g. your.public.ip:51820)" style="width:100%">
+        <input id=qrPub placeholder="Server PublicKey (auto-filled when interface is UP)" style="width:100%">
+        <div style="display:flex;gap:5px">
+          <input id=qrAddr value="10.99.0.2/32" placeholder="Client IP" style="flex:1">
+          <input id=qrDns value="1.1.1.1" placeholder="DNS" style="flex:1">
+        </div>
+        <button class=act onclick="genMobilePeerQr()">Generate Mobile Keypair + QR</button>
+      </div>
+    </details>
+
+    <!-- QR Preview & Console Output -->
+    <div id=vpnQrWrap class=vpn-card style="display:none">
+      <div class=bar style="justify-content:space-between">
+        <b id=vpnQrLabel style="color:#38bdf8">QR Code</b>
+        <button onclick="vpnQrWrap.style.display='none'" style="padding:1px 6px;font-size:10px">Hide</button>
+      </div>
+      <div id=vpnQrBox></div>
+      <pre id=vpnQrText style="max-height:110px;overflow:auto;font-size:10px"></pre>
+    </div>
+
+    <pre id=vpnMsg style="display:none;max-height:120px;overflow:auto;font-size:10px;background:#020617;border:1px solid #334155;border-radius:6px;padding:6px"></pre>
+  </div>
+</div>
+
+<script>
+let vpnState = null;
+function fmtBytes(b){
+  if(b>=1073741824) return (b/1073741824).toFixed(2)+' GB';
+  if(b>=1048576) return (b/1048576).toFixed(2)+' MB';
+  if(b>=1024) return (b/1024).toFixed(1)+' KB';
+  return b+' B';
+}
+function toggleVpnDrawer(force){
+  const open = typeof force==='boolean' ? force : !vpnDrawer.classList.contains('open');
+  vpnDrawer.classList.toggle('open', open);
+  if(open) refreshVpnStatus();
+}
+function showVpnMsg(txt, isErr){
+  vpnMsg.style.display='block';
+  vpnMsg.style.borderColor = isErr ? '#ef4444' : '#10b981';
+  vpnMsg.textContent = txt;
+}
+async function refreshVpnStatus(){
+  try{
+    const r = await fetch('/api/vpn/status');
+    const d = await r.json();
+    vpnState = d;
+    renderVpn(d);
+  }catch(e){}
+}
+function renderVpn(d){
+  const up = d.connected;
+  vpnDot.style.background = d.kill_switch_alert ? '#ef4444' : (up ? '#10b981' : '#64748b');
+  vpnPillTxt.textContent = up ? `VPN: ${d.active_iface} UP` : 'VPN: OFF';
+  let sub = '';
+  if(up && d.interfaces && d.interfaces.length){
+    const ifc = d.interfaces[0];
+    const hs = ifc.peers && ifc.peers.length && ifc.peers[0].handshake_age_sec!=null
+      ? `HS ${ifc.peers[0].handshake_age_sec}s` : 'no HS';
+    sub = `${hs} • ↓${fmtBytes(ifc.rx_bytes)} ↑${fmtBytes(ifc.tx_bytes)}`;
+    if(!qrPub.value && ifc.public_key) qrPub.value = ifc.public_key;
+  }
+  vpnPillSub.textContent = sub;
+  vpnToolsInfo.textContent = `wg: ${d.wg_installed?'OK':'missing'} | awg stealth: ${d.awg_installed?'OK':'optional'}`;
+  vpnLiveBadge.textContent = d.kill_switch_alert ? 'KILL-SWITCH ALERT (STALE / DOWN)' : (up ? `CONNECTED (${d.active_iface})` : 'DISCONNECTED');
+  vpnLiveBadge.style.color = d.kill_switch_alert ? '#ef4444' : (up ? '#10b981' : '#94a3b8');
+  vpnKsBtn.textContent = `Kill-Switch: ${d.kill_switch?'ON':'OFF'}`;
+  vpnKsBtn.style.background = d.kill_switch ? '#78350f' : '';
+
+  if(d.profiles && d.profiles.length){
+    vpnProfiles.innerHTML = d.profiles.map(p=>`
+      <div class=vpn-row>
+        <div style="min-width:0;flex:1">
+          <b style="color:${p.active?'#10b981':'#e2e8f0'}">${p.name}</b>
+          ${p.stealth_awg?'<span style="color:#a855f7;font-size:9px"> [AWG]</span>':''}
+          <div style="font-size:9px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis">${p.endpoint||p.address||'WireGuard profile'}</div>
+        </div>
+        <div class=bar style="gap:4px">
+          ${p.active
+            ? `<button class=warn style="padding:2px 7px;font-size:10px" onclick="vpnAction('disconnect','${p.name}')">Disconnect</button>`
+            : `<button class=act style="padding:2px 7px;font-size:10px" onclick="vpnAction('connect','${p.name}')">Connect</button>`}
+          <button style="padding:2px 6px;font-size:10px" onclick="showProfileQr('${p.name}')">QR</button>
+          <button style="padding:2px 6px;font-size:10px;color:#f87171" onclick="deleteVpnProf('${p.name}')">✕</button>
+        </div>
+      </div>`).join('');
+  } else {
+    vpnProfiles.innerHTML = '<span style="color:#64748b">No profiles saved yet. Upload or paste a WireGuard .conf below.</span>';
+  }
+
+  if(d.interfaces && d.interfaces.length){
+    vpnTelemetry.innerHTML = d.interfaces.map(ifc=>`
+      <div style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #1e293b">
+        <div><b style="color:#38bdf8">${ifc.name}</b> • ${ifc.ip_addrs||'no IP'} • port ${ifc.listen_port} • fwmark ${ifc.fwmark}</div>
+        <div style="color:#94a3b8;word-break:break-all">PubKey: ${ifc.public_key}</div>
+        <div>Total: ↓${fmtBytes(ifc.rx_bytes)} / ↑${fmtBytes(ifc.tx_bytes)}</div>
+        ${(ifc.peers||[]).map(peer=>`
+          <div style="margin-top:4px;padding:4px 6px;background:#020617;border-radius:4px;border-left:2px solid ${peer.health==='HEALTHY'?'#10b981':peer.health==='STALE'?'#ef4444':'#f59e0b'}">
+            <div><b>Peer:</b> ${peer.public_key.slice(0,18)}… <span style="color:${peer.health==='HEALTHY'?'#10b981':peer.health==='STALE'?'#ef4444':'#fbbf24'}">[${peer.health}${peer.handshake_age_sec!=null?' '+peer.handshake_age_sec+'s':''}]</span></div>
+            <div>Endpoint: ${peer.endpoint} | Allowed: ${peer.allowed_ips}</div>
+            <div>RX ${fmtBytes(peer.rx_bytes)} | TX ${fmtBytes(peer.tx_bytes)} | Keepalive: ${peer.keepalive}</div>
+          </div>`).join('')}
+      </div>`).join('');
+  } else {
+    vpnTelemetry.innerHTML = '<span style="color:#64748b">No active WireGuard interfaces detected.</span>';
+  }
+}
+async function vpnAction(action, name){
+  showVpnMsg(`${action==='connect'?'Connecting':'Disconnecting'} ${name}...`, false);
+  const r = await fetch('/api/vpn/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  const d = await r.json();
+  if(d.status) renderVpn(d.status);
+  if(d.ok){ showVpnMsg(d.output||`${name} ${action}ed cleanly.`, false); checkExitIp(); }
+  else { showVpnMsg(d.error||'Action failed', true); }
+}
+async function uploadVpnConf(inp){
+  const f = inp.files[0]; if(!f) return;
+  const txt = await f.text();
+  const name = f.name.replace(/\.conf$/i,'');
+  const r = await fetch('/api/vpn/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,content:txt})});
+  const d = await r.json();
+  if(d.ok){ renderVpn(d.status); showVpnMsg(`Saved profile '${d.profile.name}' (chmod 600).`, false); }
+  else { showVpnMsg(d.error, true); }
+  inp.value='';
+}
+async function savePastedVpn(){
+  const name = vpnProfName.value.trim(), content = vpnProfBody.value.trim();
+  const r = await fetch('/api/vpn/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,content})});
+  const d = await r.json();
+  if(d.ok){ renderVpn(d.status); vpnProfName.value=''; vpnProfBody.value=''; showVpnMsg(`Saved profile '${d.profile.name}'.`, false); }
+  else { showVpnMsg(d.error, true); }
+}
+async function deleteVpnProf(name){
+  const r = await fetch('/api/vpn/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  const d = await r.json();
+  if(d.ok){ renderVpn(d.status); showVpnMsg(`Deleted profile '${name}'.`, false); }
+  else { showVpnMsg(d.error, true); }
+}
+async function showProfileQr(name){
+  const r = await fetch('/api/vpn/qr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'profile',name})});
+  const d = await r.json();
+  if(d.ok){
+    vpnQrWrap.style.display='block';
+    vpnQrLabel.textContent = d.label;
+    vpnQrBox.innerHTML = d.svg_qr;
+    vpnQrText.textContent = d.client_conf;
+  } else { showVpnMsg(d.error, true); }
+}
+async function genMobilePeerQr(){
+  const r = await fetch('/api/vpn/qr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    mode:'mobile_peer', server_endpoint:qrEp.value, server_pubkey:qrPub.value, client_addr:qrAddr.value, dns:qrDns.value
+  })});
+  const d = await r.json();
+  if(d.ok){
+    vpnQrWrap.style.display='block';
+    vpnQrLabel.textContent = d.label;
+    vpnQrBox.innerHTML = d.svg_qr;
+    vpnQrText.textContent = `# --- APPEND TO SERVER ---
+${d.server_peer_snippet}
+# --- MOBILE CLIENT .CONF ---
+${d.client_conf}`;
+  } else { showVpnMsg(d.error, true); }
+}
+async function checkExitIp(){
+  vpnExitIp.textContent = 'Exit IP: querying...';
+  const r = await fetch('/api/vpn/exit_ip');
+  const d = await r.json();
+  vpnExitIp.textContent = d.ok ? `Exit IP: ${d.ip}` : `Exit IP: ${d.error}`;
+}
+async function toggleKillSwitch(){
+  const next = !(vpnState && vpnState.kill_switch);
+  const r = await fetch('/api/vpn/killswitch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:next})});
+  const d = await r.json();
+  if(d.status) renderVpn(d.status);
+}
+refreshVpnStatus();
+setInterval(()=>refreshVpnStatus(), 6000);
+</script>
+
+</body></html>

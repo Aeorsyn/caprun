@@ -7,6 +7,7 @@ mod pty_term;
 mod spiderweb;
 mod tls_decrypt;
 mod prism;
+mod vpn;
 
 use anyhow::{bail, Context, Result};
 use blake3::Hasher;

@@ -49,6 +49,7 @@ struct SharedState {
     chrono_tx: broadcast::Sender<ChronoLine>,
     pub tls: crate::tls_decrypt::TlsKeyStore,
     pub prism: crate::prism::PrismEngine,
+    pub vpn: crate::vpn::VpnManager,
 }
 
 fn push_event(st: &SharedState, line: String, x: u32, y: u32, amp: f32) {
@@ -146,6 +147,7 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
             chrono_tx,
             tls: crate::tls_decrypt::TlsKeyStore::new(),
         prism: crate::prism::PrismEngine::new(),
+        vpn: crate::vpn::VpnManager::new(),
 });
 
         // 1. Live AF_PACKET wire sniffer -> feeds BOTH Cortex 1 (STDP) and Cortex 2 (Chronovisor) + Spiderweb
@@ -220,6 +222,14 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
         .route("/api/prism/synthesize", post(api_prism_synthesize))
         .route("/api/prism/arm", post(api_prism_arm))
         .route("/api/prism/rollback", post(api_prism_rollback))
+        .route("/api/vpn/status", get(api_vpn_status))
+        .route("/api/vpn/import", post(api_vpn_import))
+        .route("/api/vpn/delete", post(api_vpn_delete))
+        .route("/api/vpn/connect", post(api_vpn_connect))
+        .route("/api/vpn/disconnect", post(api_vpn_disconnect))
+        .route("/api/vpn/qr", post(api_vpn_qr))
+        .route("/api/vpn/exit_ip", get(api_vpn_exit_ip))
+        .route("/api/vpn/killswitch", post(api_vpn_killswitch))
             .with_state(state);
 
         println!("caprun 10-tab OpsDeck ({xdp_mode} | wire_sniffer={sniffer_ok}) -> http://localhost:{port}");
@@ -597,4 +607,110 @@ async fn api_prism_rollback(State(st): State<Arc<SharedState>>, Json(r): Json<Pr
         Ok(rule) => Json(serde_json::json!({ "ok": true, "rule": rule, "rules": st.prism.list_rules() })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
+}
+
+#[derive(Deserialize)]
+struct VpnImportReq {
+    name: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct VpnNameReq {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct VpnQrReq {
+    mode: String, // "profile" | "mobile_peer"
+    name: Option<String>,
+    server_endpoint: Option<String>,
+    server_pubkey: Option<String>,
+    client_addr: Option<String>,
+    dns: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VpnKillSwitchReq {
+    enabled: bool,
+}
+
+async fn api_vpn_status(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    Json(serde_json::to_value(st.vpn.status()).unwrap_or_default())
+}
+
+async fn api_vpn_import(State(st): State<Arc<SharedState>>, Json(r): Json<VpnImportReq>) -> Json<serde_json::Value> {
+    match st.vpn.save_profile(&r.name, &r.content) {
+        Ok(prof) => Json(serde_json::json!({ "ok": true, "profile": prof, "status": st.vpn.status() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_vpn_delete(State(st): State<Arc<SharedState>>, Json(r): Json<VpnNameReq>) -> Json<serde_json::Value> {
+    match st.vpn.delete_profile(&r.name) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "status": st.vpn.status() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_vpn_connect(State(st): State<Arc<SharedState>>, Json(r): Json<VpnNameReq>) -> Json<serde_json::Value> {
+    let vpn = st.vpn.clone();
+    let name = r.name.clone();
+    let res = tokio::task::spawn_blocking(move || vpn.connect(&name))
+        .await
+        .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(msg) => Json(serde_json::json!({ "ok": true, "output": msg, "status": st.vpn.status() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e, "status": st.vpn.status() })),
+    }
+}
+
+async fn api_vpn_disconnect(State(st): State<Arc<SharedState>>, Json(r): Json<VpnNameReq>) -> Json<serde_json::Value> {
+    let vpn = st.vpn.clone();
+    let name = r.name.clone();
+    let res = tokio::task::spawn_blocking(move || vpn.disconnect(&name))
+        .await
+        .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(msg) => Json(serde_json::json!({ "ok": true, "output": msg, "status": st.vpn.status() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e, "status": st.vpn.status() })),
+    }
+}
+
+async fn api_vpn_qr(State(st): State<Arc<SharedState>>, Json(r): Json<VpnQrReq>) -> Json<serde_json::Value> {
+    let res = match r.mode.as_str() {
+        "profile" => st.vpn.qr_for_profile(r.name.as_deref().unwrap_or("")),
+        "mobile_peer" => st.vpn.generate_mobile_peer(
+            r.server_endpoint.as_deref().unwrap_or(""),
+            r.server_pubkey.as_deref().unwrap_or(""),
+            r.client_addr.as_deref().unwrap_or("10.99.0.2/32"),
+            r.dns.as_deref().unwrap_or("1.1.1.1"),
+        ),
+        _ => Err("Unknown QR mode (expected 'profile' or 'mobile_peer')".into()),
+    };
+    match res {
+        Ok(qr) => Json(serde_json::to_value(qr).unwrap_or_default()),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_vpn_exit_ip(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let req = st
+        .http
+        .get("https://api.ipify.org?format=json")
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await;
+    match req {
+        Ok(resp) => {
+            let v = resp.json::<serde_json::Value>().await.unwrap_or_default();
+            Json(serde_json::json!({ "ok": true, "ip": v["ip"].as_str().unwrap_or("unknown") }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("Exit IP lookup failed: {e}") })),
+    }
+}
+
+async fn api_vpn_killswitch(State(st): State<Arc<SharedState>>, Json(r): Json<VpnKillSwitchReq>) -> Json<serde_json::Value> {
+    let enabled = st.vpn.set_kill_switch(r.enabled);
+    Json(serde_json::json!({ "ok": true, "kill_switch": enabled, "status": st.vpn.status() }))
 }
