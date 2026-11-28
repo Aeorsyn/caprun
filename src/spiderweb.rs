@@ -608,3 +608,23 @@ impl Spiderweb {
         Some(art)
     }
 }
+
+impl Spiderweb {
+    pub fn prism_snapshots(&self) -> Vec<(u64, String, String, u16, String, u16, u64, usize)> {
+        self.flows
+            .values()
+            .map(|f| {
+                (
+                    f.id,
+                    f.proto.clone(),
+                    f.src_ip.to_string(),
+                    f.src_port as u16,
+                    f.dst_ip.to_string(),
+                    f.dst_port as u16,
+                    f.pkts as u64,
+                    f.payload.len(),
+                )
+            })
+            .collect()
+    }
+}

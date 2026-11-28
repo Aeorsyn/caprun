@@ -6,6 +6,7 @@ mod soc_loop;
 mod pty_term;
 mod spiderweb;
 mod tls_decrypt;
+mod prism;
 
 use anyhow::{bail, Context, Result};
 use blake3::Hasher;

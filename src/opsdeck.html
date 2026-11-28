@@ -62,8 +62,11 @@ h3{margin:0 0 6px;color:#38bdf8;font-size:12px}
         <button class=warn id=chBtnXor>GPU XOR + YARA</button>
         <button id=chBtnLlm style="border-color:#a855f7;color:#e9d5ff">Ask Local LLM</button>
         <button class=warn id=chBtnDrop>XDP_DROP IP</button>
+        <button id=chBtnPrism style="border-color:#10b981;color:#6ee7b7">Prism DNA + Lineage</button>
+        <button id=chBtnSynth style="border-color:#f59e0b;color:#fde68a">Shadow Rule (LLM)</button>
       </div>
       <pre id=chDrOut></pre>
+      <div id=prismRules style="margin-top:5px;font-size:10px;color:#cbd5e1"></div>
     </div>
   </div>
   <div class=hSplit data-top="pChrono" data-bot="pTerm" title="Drag to resize Chronovisor / Bash PTY"></div>
@@ -302,6 +305,26 @@ chv.onclick=(e)=>{
     const d=await r.json();
     chDrOut.textContent=d.ok?d.reply:d.error;
   };
+
+  chBtnPrism.onclick=async()=>{
+    chDrOut.textContent='Resolving /proc socket lineage & Spectral Traffic DNA...';
+    const r=await fetch('/api/prism/inspect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({flow_id:row.flow_id||0,proto:row.proto||'TCP',src:row.src||'',dst:row.dst||''})});
+    const d=await r.json();
+    if(d.ok){
+      const x=d.dna, lin=x.lineage;
+      const ltxt=lin?`PID ${lin.pid} | ${lin.parent_chain.join(' <- ')}\nEXE: ${lin.exe}\nSHA256: ${lin.exe_sha256}\nAnomalies: ${lin.anomalies.join(', ')||'none'}`:'(Remote/ephemeral socket not in local /proc table)';
+      chDrOut.textContent=`[PRISM ${x.classification} | Score ${x.beacon_score}/100]\nSamples: ${x.samples} | Mean IAT: ${x.mean_iat_ms}ms | Jitter CV: ${x.jitter_cv} | DFT PAPR: ${x.dft_papr} | Avg Bytes: ${x.avg_pkt_bytes}\nVulkan Broker: ${x.vulkan_broker_online?'ONLINE':'offline'}\n--- PROCESS LINEAGE ---\n${ltxt}`;
+      renderPrismRules(d.rules||[]);
+    } else { chDrOut.textContent=JSON.stringify(d,null,2); }
+  };
+  chBtnSynth.onclick=async()=>{
+    chDrOut.textContent='Synthesizing Shadow-Mode containment rule via local llama-server (:8080)...';
+    const r=await fetch('/api/prism/synthesize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({flow_id:row.flow_id||0,proto:row.proto||'TCP',src:row.src||'',dst:row.dst||''})});
+    const d=await r.json();
+    chDrOut.textContent=d.ok?`Created SHADOW Rule #${d.rule.id} (${d.rule.action}) -> ${d.rule.target_ip}:${d.rule.target_port}\nReason: ${d.rule.reason}`:JSON.stringify(d,null,2);
+    if(d.rules) renderPrismRules(d.rules);
+  };
+
   chBtnDrop.onclick=async()=>{
     const ip=row.dst.split(':')[0];
     const r=await fetch('/api/xdp/block',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip})});

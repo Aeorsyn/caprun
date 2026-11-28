@@ -48,6 +48,7 @@ struct SharedState {
     frame_tx: broadcast::Sender<(Vec<u8>, String)>,
     chrono_tx: broadcast::Sender<ChronoLine>,
     pub tls: crate::tls_decrypt::TlsKeyStore,
+    pub prism: crate::prism::PrismEngine,
 }
 
 fn push_event(st: &SharedState, line: String, x: u32, y: u32, amp: f32) {
@@ -144,6 +145,7 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
             frame_tx,
             chrono_tx,
             tls: crate::tls_decrypt::TlsKeyStore::new(),
+        prism: crate::prism::PrismEngine::new(),
 });
 
         // 1. Live AF_PACKET wire sniffer -> feeds BOTH Cortex 1 (STDP) and Cortex 2 (Chronovisor) + Spiderweb
@@ -213,7 +215,11 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
             .route("/api/{*path}", get(proxy_get).post(proxy_post))
         .route("/api/tls/keylog", post(api_tls_keylog))
         .route("/api/tls/status", get(api_tls_status))
-        .route("/api/llm/inspect", post(api_llm_inspect))
+        .route("/api/prism/status", get(api_prism_status))
+        .route("/api/prism/inspect", post(api_prism_inspect))
+        .route("/api/prism/synthesize", post(api_prism_synthesize))
+        .route("/api/prism/arm", post(api_prism_arm))
+        .route("/api/prism/rollback", post(api_prism_rollback))
             .with_state(state);
 
         println!("caprun 10-tab OpsDeck ({xdp_mode} | wire_sniffer={sniffer_ok}) -> http://localhost:{port}");
@@ -498,3 +504,97 @@ fn b64_decode_simple(input: &str) -> Vec<u8> {
 }
 
 
+
+#[derive(Deserialize)]
+struct PrismInspectReq {
+    flow_id: u64,
+    proto: String,
+    src: String,
+    dst: String,
+}
+
+#[derive(Deserialize)]
+struct PrismRuleToggleReq {
+    id: u64,
+}
+
+async fn api_prism_status(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let snaps = st.spiderweb.lock().unwrap().prism_snapshots();
+    st.prism.ingest_snapshots(&snaps);
+    let (flows, shadow, armed) = st.prism.summary_stats();
+    Json(serde_json::json!({
+        "ok": true,
+        "tracked_flows": flows,
+        "shadow_rules": shadow,
+        "armed_rules": armed,
+        "rules": st.prism.list_rules()
+    }))
+}
+
+async fn api_prism_inspect(State(st): State<Arc<SharedState>>, Json(r): Json<PrismInspectReq>) -> Json<serde_json::Value> {
+    let snaps = st.spiderweb.lock().unwrap().prism_snapshots();
+    st.prism.ingest_snapshots(&snaps);
+    let dna = st.prism.inspect_flow(r.flow_id, &r.proto, &r.src, &r.dst);
+    Json(serde_json::json!({ "ok": true, "dna": dna, "rules": st.prism.list_rules() }))
+}
+
+async fn api_prism_synthesize(State(st): State<Arc<SharedState>>, Json(r): Json<PrismInspectReq>) -> Json<serde_json::Value> {
+    let snaps = st.spiderweb.lock().unwrap().prism_snapshots();
+    st.prism.ingest_snapshots(&snaps);
+    let dna = st.prism.inspect_flow(r.flow_id, &r.proto, &r.src, &r.dst);
+
+    let dst_ip = r.dst.split(':').next().unwrap_or(&r.dst).to_string();
+    let dst_port = r.dst.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+    let pid = dna.lineage.as_ref().map(|l| l.pid);
+
+    let prompt = format!(
+        "Flow {} {}->{} | Score={}/100 ({}) | IAT={}ms CV={} PAPR={} | Lineage={:?}. Recommend one containment action (XDP_DROP_TUPLE, FREEZE_PID, RATE_LIMIT, or PCAP_RECORD) and a 1-sentence reason.",
+        dna.proto, dna.src, dna.dst, dna.beacon_score, dna.classification,
+        dna.mean_iat_ms, dna.jitter_cv, dna.dft_papr, dna.lineage.as_ref().map(|l| &l.parent_chain)
+    );
+
+    let body = serde_json::json!({
+        "model": "local",
+        "temperature": 0.1,
+        "max_tokens": 120,
+        "messages": [
+            { "role": "system", "content": "You are Prism, a Linux NDR/EDR policy synthesizer. Reply concisely with the recommended action name and a brief justification." },
+            { "role": "user", "content": prompt }
+        ]
+    });
+
+    let llm_reason = match st.http.post(format!("{}/v1/chat/completions", st.llm_url.trim_end_matches('/'))).json(&body).send().await {
+        Ok(resp) => {
+            let v = resp.json::<serde_json::Value>().await.unwrap_or_default();
+            v["choices"][0]["message"]["content"].as_str().unwrap_or("Spectral/lineage threshold review").to_string()
+        }
+        Err(_) => format!("Heuristic Shadow Rule: {} (score {}/100)", dna.classification, dna.beacon_score),
+    };
+
+    let action = if llm_reason.contains("FREEZE_PID") && pid.is_some() {
+        "FREEZE_PID"
+    } else if llm_reason.contains("XDP_DROP_TUPLE") {
+        "XDP_DROP_TUPLE"
+    } else if llm_reason.contains("RATE_LIMIT") {
+        "RATE_LIMIT"
+    } else {
+        "PCAP_RECORD"
+    };
+
+    let rule = st.prism.add_shadow_rule(action.into(), dst_ip, dst_port, pid, llm_reason);
+    Json(serde_json::json!({ "ok": true, "rule": rule, "dna": dna, "rules": st.prism.list_rules() }))
+}
+
+async fn api_prism_arm(State(st): State<Arc<SharedState>>, Json(r): Json<PrismRuleToggleReq>) -> Json<serde_json::Value> {
+    match st.prism.set_rule_mode(r.id, true) {
+        Ok(rule) => Json(serde_json::json!({ "ok": true, "rule": rule, "rules": st.prism.list_rules() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_prism_rollback(State(st): State<Arc<SharedState>>, Json(r): Json<PrismRuleToggleReq>) -> Json<serde_json::Value> {
+    match st.prism.set_rule_mode(r.id, false) {
+        Ok(rule) => Json(serde_json::json!({ "ok": true, "rule": rule, "rules": st.prism.list_rules() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
