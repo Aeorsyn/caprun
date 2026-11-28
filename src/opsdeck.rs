@@ -211,6 +211,9 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
             .route("/api/spiderweb/iptraf", get(api_sw_iptraf))
             .route("/api/spiderweb/reconstruct", post(api_sw_reconstruct))
             .route("/api/{*path}", get(proxy_get).post(proxy_post))
+        .route("/api/tls/keylog", post(api_tls_keylog))
+        .route("/api/tls/status", get(api_tls_status))
+        .route("/api/llm/inspect", post(api_llm_inspect))
             .with_state(state);
 
         println!("caprun 10-tab OpsDeck ({xdp_mode} | wire_sniffer={sniffer_ok}) -> http://localhost:{port}");
@@ -257,7 +260,7 @@ async fn api_sw_flows(State(st): State<Arc<SharedState>>) -> Json<serde_json::Va
 
 #[derive(Deserialize)] struct ReconReq { id: u64 }
 async fn api_sw_reconstruct(State(st): State<Arc<SharedState>>, Json(r): Json<ReconReq>) -> Json<serde_json::Value> {
-    match st.spiderweb.lock().unwrap().reconstruct(r.id) {
+    match st.spiderweb.lock().unwrap().reconstruct_with_tls(r.id, &st.tls) {
         Some(rec) => Json(serde_json::json!({ "ok": true, "reconstruction": rec })),
         None => Json(serde_json::json!({ "ok": false, "error": "Flow expired or not found" })),
     }
