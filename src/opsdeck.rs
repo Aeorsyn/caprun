@@ -50,6 +50,7 @@ struct SharedState {
     pub tls: crate::tls_decrypt::TlsKeyStore,
     pub prism: crate::prism::PrismEngine,
     pub vpn: crate::vpn::VpnManager,
+    pub onion: crate::onion::OnionRouter,
 }
 
 fn push_event(st: &SharedState, line: String, x: u32, y: u32, amp: f32) {
@@ -148,6 +149,7 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
             tls: crate::tls_decrypt::TlsKeyStore::new(),
         prism: crate::prism::PrismEngine::new(),
         vpn: crate::vpn::VpnManager::new(),
+        onion: crate::onion::OnionRouter::new(),
 });
 
         // 1. Live AF_PACKET wire sniffer -> feeds BOTH Cortex 1 (STDP) and Cortex 2 (Chronovisor) + Spiderweb
@@ -230,6 +232,14 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
         .route("/api/vpn/qr", post(api_vpn_qr))
         .route("/api/vpn/exit_ip", get(api_vpn_exit_ip))
         .route("/api/vpn/killswitch", post(api_vpn_killswitch))
+        .route("/api/vpn/switch_endpoint", post(api_vpn_switch_endpoint))
+        .route("/api/onion/status", get(api_onion_status))
+        .route("/api/onion/start", post(api_onion_start))
+        .route("/api/onion/stop", post(api_onion_stop))
+        .route("/api/onion/exit", post(api_onion_exit))
+        .route("/api/onion/newnym", post(api_onion_newnym))
+        .route("/api/onion/exit_ip", get(api_onion_exit_ip))
+        .route("/api/onion/fetch", post(api_onion_fetch))
             .with_state(state);
 
         println!("caprun 10-tab OpsDeck ({xdp_mode} | wire_sniffer={sniffer_ok}) -> http://localhost:{port}");
@@ -713,4 +723,120 @@ async fn api_vpn_exit_ip(State(st): State<Arc<SharedState>>) -> Json<serde_json:
 async fn api_vpn_killswitch(State(st): State<Arc<SharedState>>, Json(r): Json<VpnKillSwitchReq>) -> Json<serde_json::Value> {
     let enabled = st.vpn.set_kill_switch(r.enabled);
     Json(serde_json::json!({ "ok": true, "kill_switch": enabled, "status": st.vpn.status() }))
+}
+
+#[derive(Deserialize)]
+struct VpnSwitchEpReq {
+    iface: String,
+    peer_pubkey: String,
+    endpoint: String,
+    persist: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct OnionStartReq {
+    exit_nodes: Option<String>,
+    strict_nodes: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct OnionExitReq {
+    exit_nodes: String,
+    strict_nodes: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct OnionFetchReq {
+    url: String,
+}
+
+async fn api_vpn_switch_endpoint(State(st): State<Arc<SharedState>>, Json(r): Json<VpnSwitchEpReq>) -> Json<serde_json::Value> {
+    let vpn = st.vpn.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        vpn.switch_endpoint(&r.iface, &r.peer_pubkey, &r.endpoint, r.persist.unwrap_or(true))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(msg) => Json(serde_json::json!({ "ok": true, "output": msg, "status": st.vpn.status() })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e, "status": st.vpn.status() })),
+    }
+}
+
+async fn api_onion_status(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || onion.status())
+        .await
+        .unwrap_or_else(|_| st.onion.status());
+    Json(serde_json::to_value(res).unwrap_or_default())
+}
+
+async fn api_onion_start(State(st): State<Arc<SharedState>>, Json(r): Json<OnionStartReq>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        onion.start(r.exit_nodes.as_deref(), r.strict_nodes)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(st_val) => Json(serde_json::to_value(st_val).unwrap_or_default()),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_onion_stop(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || onion.stop())
+        .await
+        .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(st_val) => Json(serde_json::to_value(st_val).unwrap_or_default()),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_onion_exit(State(st): State<Arc<SharedState>>, Json(r): Json<OnionExitReq>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        onion.set_exit(&r.exit_nodes, r.strict_nodes.unwrap_or(true))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(st_val) => Json(serde_json::to_value(st_val).unwrap_or_default()),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_onion_newnym(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || onion.new_identity())
+        .await
+        .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(msg) => Json(serde_json::json!({ "ok": true, "message": msg })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_onion_exit_ip(State(st): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || onion.check_exit_ip())
+        .await
+        .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(val) => Json(serde_json::json!({ "ok": true, "tor_check": val })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn api_onion_fetch(State(st): State<Arc<SharedState>>, Json(r): Json<OnionFetchReq>) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let res = tokio::task::spawn_blocking(move || onion.fetch_onion(&r.url))
+        .await
+        .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+    match res {
+        Ok(val) => Json(serde_json::to_value(val).unwrap_or_default()),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }

@@ -491,3 +491,46 @@ fn read_iface_ips(iface: &str) -> String {
         })
         .unwrap_or_default()
 }
+
+impl VpnManager {
+    /// Hot-swaps an active WireGuard peer's exit server IP:port without tearing down the tunnel.
+    pub fn switch_endpoint(
+        &self,
+        raw_iface: &str,
+        peer_pubkey: &str,
+        new_endpoint: &str,
+        persist_profile: bool,
+    ) -> Result<String, String> {
+        let iface = sanitize_iface_name(raw_iface)?;
+        let pk = peer_pubkey.trim();
+        let ep = new_endpoint.trim();
+        if pk.is_empty() || ep.is_empty() || !ep.contains(':') {
+            return Err("Provide peer_pubkey and new_endpoint as host:port (e.g. 185.213.154.68:51820)".into());
+        }
+        let out = run_priv_cmd("wg", &["set", &iface, "peer", pk, "endpoint", ep])?;
+        if persist_profile {
+            let path = self.profile_dir.join(format!("{iface}.conf"));
+            if let Ok(content) = fs::read_to_string(&path) {
+                let updated: Vec<String> = content
+                    .lines()
+                    .map(|l| {
+                        if l.trim_start().to_ascii_lowercase().starts_with("endpoint") {
+                            format!("Endpoint = {ep}")
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect();
+                let _ = fs::write(&path, updated.join("
+") + "
+");
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+            }
+        }
+        Ok(if out.is_empty() {
+            format!("Switched {iface} exit server endpoint to {ep}")
+        } else {
+            out
+        })
+    }
+}

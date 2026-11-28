@@ -8,6 +8,7 @@ mod spiderweb;
 mod tls_decrypt;
 mod prism;
 mod vpn;
+mod onion;
 
 use anyhow::{bail, Context, Result};
 use blake3::Hasher;
