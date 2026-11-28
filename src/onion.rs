@@ -468,3 +468,176 @@ fn bin_exists(name: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExitRelayInfo {
+    pub nickname: String,
+    pub fingerprint: String,
+    pub ip: String,
+    pub country: String,
+    pub country_name: String,
+    pub as_name: String,
+    pub bandwidth_mbps: f64,
+    pub consensus_weight: u64,
+    pub flags: Vec<String>,
+}
+
+impl OnionRouter {
+    /// Queries Tor Project Onionoo for live running Exit relays filtered by country,
+    /// IP/nickname/ASN substring, and minimum observed bandwidth (Mbps).
+    pub fn search_exit_relays(
+        &self,
+        country: &str,
+        query: &str,
+        min_mbps: f64,
+        limit: usize,
+        via_tor: bool,
+    ) -> Result<(String, Vec<ExitRelayInfo>), String> {
+        let mut url = String::from(
+            "https://onionoo.torproject.org/details?type=relay&running=true&flag=Exit&order=-consensus_weight&limit=150&fields=nickname,fingerprint,or_addresses,exit_addresses,country,country_name,observed_bandwidth,consensus_weight,flags,as_name",
+        );
+
+        let cc = country.trim().to_ascii_lowercase();
+        if cc.len() == 2 && cc.chars().all(|c| c.is_ascii_alphabetic()) {
+            url.push_str("&country=");
+            url.push_str(&cc);
+        }
+
+        let q = query.trim();
+        if !q.is_empty() {
+            url.push_str("&search=");
+            url.push_str(&url_encode_q(q));
+        }
+
+        let mut args: Vec<String> = vec!["-sS".into(), "--max-time".into(), "15".into()];
+        let source = if via_tor {
+            if !self.is_control_alive() {
+                return Err("Onion Router is stopped. Start it first or uncheck 'Via Tor'.".into());
+            }
+            args.push("--socks5-hostname".into());
+            args.push(format!("127.0.0.1:{SOCKS_PORT}"));
+            "onionoo_via_tor".to_string()
+        } else {
+            "onionoo_direct".to_string()
+        };
+        args.push(url);
+
+        let out = Command::new("curl")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("curl failed querying Onionoo: {e}"))?;
+
+        if !out.status.success() {
+            return Err(format!(
+                "Onionoo query failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+
+        let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("Invalid Onionoo JSON response: {e}"))?;
+
+        let arr = parsed["relays"]
+            .as_array()
+            .ok_or_else(|| "Onionoo response missing 'relays' array".to_string())?;
+
+        let q_low = q.to_ascii_lowercase();
+        let mut relays: Vec<ExitRelayInfo> = Vec::new();
+
+        for item in arr {
+            let nickname = item["nickname"].as_str().unwrap_or("unnamed").to_string();
+            let fingerprint = item["fingerprint"].as_str().unwrap_or("").to_string();
+            if fingerprint.is_empty() {
+                continue;
+            }
+
+            let exit_ips: Vec<String> = item["exit_addresses"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let or_addrs: Vec<String> = item["or_addresses"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            let ip = exit_ips
+                .first()
+                .cloned()
+                .or_else(|| {
+                    or_addrs
+                        .iter()
+                        .find(|a| !a.starts_with('['))
+                        .and_then(|a| a.split(':').next())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    or_addrs
+                        .first()
+                        .map(|a| a.trim_start_matches('[').split(']').next().unwrap_or(a).to_string())
+                })
+                .unwrap_or_else(|| "unknown".into());
+
+            let obs_bps = item["observed_bandwidth"].as_u64().unwrap_or(0);
+            let bandwidth_mbps = ((obs_bps as f64 * 8.0) / 1_000_000.0 * 10.0).round() / 10.0;
+            if bandwidth_mbps < min_mbps {
+                continue;
+            }
+
+            let country_code = item["country"].as_str().unwrap_or("??").to_ascii_uppercase();
+            let country_name = item["country_name"].as_str().unwrap_or("").to_string();
+            let as_name = item["as_name"].as_str().unwrap_or("").to_string();
+            let consensus_weight = item["consensus_weight"].as_u64().unwrap_or(0);
+            let flags: Vec<String> = item["flags"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            if !q_low.is_empty() {
+                let hay = format!(
+                    "{nickname} {fingerprint} {ip} {} {} {as_name} {country_name}",
+                    exit_ips.join(" "),
+                    or_addrs.join(" ")
+                )
+                .to_ascii_lowercase();
+                if !hay.contains(&q_low) {
+                    continue;
+                }
+            }
+
+            relays.push(ExitRelayInfo {
+                nickname,
+                fingerprint,
+                ip,
+                country: country_code,
+                country_name,
+                as_name,
+                bandwidth_mbps,
+                consensus_weight,
+                flags,
+            });
+        }
+
+        relays.sort_by(|a, b| {
+            b.bandwidth_mbps
+                .partial_cmp(&a.bandwidth_mbps)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.consensus_weight.cmp(&a.consensus_weight))
+        });
+        relays.truncate(limit.clamp(1, 100));
+
+        Ok((source, relays))
+    }
+}
+
+fn url_encode_q(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b':' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}

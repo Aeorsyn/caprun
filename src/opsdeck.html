@@ -558,6 +558,44 @@ AllowedIPs = 0.0.0.0/0" style="width:100%;font-family:monospace;font-size:10px;b
         <!-- Live 3-Hop Circuit Chain -->
         <div id=onionCircuits style="font-size:10px;background:#020617;border:1px solid #1e293b;border-radius:4px;padding:5px;max-height:110px;overflow:auto;color:#cbd5e1">No active 3-hop circuits yet.</div>
 
+        
+        <!-- Live Tor Exit Relay Directory Search -->
+        <details id=onionRelayBox style="border-top:1px solid #1e293b;padding-top:6px" open>
+          <summary style="cursor:pointer;font-size:10px;color:#38bdf8;font-weight:bold">Live Exit Relay Directory (Filter &amp; Pin)</summary>
+          <div style="margin-top:5px;display:flex;flex-direction:column;gap:4px">
+            <div style="display:flex;gap:4px">
+              <select id=relayCC style="width:74px;background:#020617;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:2px;font-size:10px">
+                <option value="">Any CC</option>
+                <option value="ch">CH</option>
+                <option value="is">IS</option>
+                <option value="nl">NL</option>
+                <option value="se">SE</option>
+                <option value="de">DE</option>
+                <option value="fr">FR</option>
+                <option value="no">NO</option>
+                <option value="fi">FI</option>
+                <option value="lu">LU</option>
+                <option value="ro">RO</option>
+                <option value="gb">GB</option>
+                <option value="us">US</option>
+                <option value="ca">CA</option>
+                <option value="jp">JP</option>
+                <option value="sg">SG</option>
+              </select>
+              <input id=relayMinBw type=number min=0 step=10 value="50" title="Minimum observed bandwidth (Mbps)" placeholder="Min Mbps" style="width:78px">
+              <input id=relayQuery placeholder="IP, nickname, or ASN" style="flex:1">
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+              <label style="font-size:10px;color:#94a3b8;display:flex;align-items:center;gap:3px"><input id=relayViaTor type=checkbox>Query via Tor (:9150)</label>
+              <button class=act style="padding:2px 9px;font-size:10px" onclick="searchExitRelays()">Search Exits</button>
+            </div>
+            <div id=onionRelayStatus style="font-size:9px;color:#94a3b8"></div>
+            <div id=onionRelayList style="max-height:190px;overflow:auto;background:#020617;border:1px solid #1e293b;border-radius:4px;padding:4px;font-size:10px;color:#cbd5e1">
+              <span style="color:#64748b">Click <b>Search Exits</b> to load live active Tor exit nodes sorted by bandwidth.</span>
+            </div>
+          </div>
+        </details>
+
         <!-- .onion Dark Web Inspector -->
         <div style="border-top:1px solid #1e293b;padding-top:6px;display:flex;flex-direction:column;gap:4px">
           <b style="font-size:10px;color:#e9d5ff">.onion v3 / Dark Web Inspector (Zero DNS Leak)</b>
@@ -835,6 +873,74 @@ async function onionExitIp(){
   const d = await r.json();
   onionExitRes.textContent = d.ok ? `Tor Exit IP: ${d.tor_check.IP} (IsTor=${d.tor_check.IsTor})` : `Error: ${d.error}`;
 }
+
+async function searchExitRelays(){
+  onionRelayStatus.textContent = 'Querying live Tor exit directory...';
+  onionRelayList.innerHTML = '<span style="color:#94a3b8">Loading active Exit relays...</span>';
+  const r = await fetch('/api/onion/relays',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      country: relayCC.value,
+      query: relayQuery.value,
+      min_mbps: parseFloat(relayMinBw.value || '0') || 0,
+      limit: 35,
+      via_tor: relayViaTor.checked
+    })
+  });
+  const d = await r.json();
+  if(!d.ok){
+    onionRelayStatus.textContent = 'Error: ' + (d.error || 'directory lookup failed');
+    onionRelayList.innerHTML = '';
+    return;
+  }
+  onionRelayStatus.textContent = `${d.count} live exits (${d.source}) — click Pin to lock ExitNodes to a relay`;
+  if(!d.relays.length){
+    onionRelayList.innerHTML = '<span style="color:#f59e0b">No active exits matched those filters. Try lowering Min Mbps.</span>';
+    return;
+  }
+  onionRelayList.innerHTML = d.relays.map(x=>{
+    const fp = '$'+x.fingerprint;
+    const bwColor = x.bandwidth_mbps >= 200 ? '#10b981' : (x.bandwidth_mbps >= 80 ? '#38bdf8' : '#cbd5e1');
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 2px;border-bottom:1px solid #1e293b">
+        <div style="min-width:0;flex:1">
+          <div><b style="color:#e2e8f0">${x.nickname}</b> <span style="color:#c084fc">[${x.country}]</span> <span style="color:${bwColor};font-weight:bold">${x.bandwidth_mbps} Mbps</span></div>
+          <div style="font-size:9px;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.ip} • ${x.as_name||'Unknown AS'} • ${x.fingerprint.slice(0,10)}…</div>
+        </div>
+        <div style="display:flex;gap:3px;flex-shrink:0">
+          <button class=act style="padding:2px 6px;font-size:9px" onclick="pinExitRelay('${fp}','${x.nickname}','${x.ip}')">Pin</button>
+          <button style="padding:2px 5px;font-size:9px;border-color:#c084fc;color:#e9d5ff" title="Append to custom exit pool" onclick="poolExitRelay('${fp}')">+Pool</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+async function pinExitRelay(fp, nick, ip){
+  onionExitIn.value = fp;
+  const endpoint = (onionState && onionState.running) ? '/api/onion/exit' : '/api/onion/start';
+  showVpnMsg(`Pinning exit ${nick} (${ip}) [${fp.slice(0,11)}…]...`, false);
+  const r = await fetch(endpoint,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({exit_nodes:fp, strict_nodes:onionStrict.checked})
+  });
+  const d = await r.json();
+  if(d.ok){
+    onionState = d;
+    renderOnion(d);
+    updateCombinedPill();
+    showVpnMsg(`Pinned live exit -> ${nick} (${ip}). Click 'Tor IP' to confirm exit address.`, false);
+  } else {
+    showVpnMsg(d.error || 'Pin failed', true);
+  }
+}
+function poolExitRelay(fp){
+  const cur = onionExitIn.value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(!cur.includes(fp)) cur.push(fp);
+  onionExitIn.value = cur.join(',');
+  showVpnMsg(`Added ${fp.slice(0,11)}… to exit pool (${cur.length} nodes). Click Apply to activate.`, false);
+}
+
 async function fetchOnionUrl(){
   onionFetchOut.style.display='block';
   onionFetchOut.textContent='Fetching over Tor SOCKS5h (127.0.0.1:9150)...';

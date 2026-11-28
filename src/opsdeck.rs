@@ -240,6 +240,7 @@ pub fn run_opsdeck(iface: String, port: u16, llm_url: String) -> Result<()> {
         .route("/api/onion/newnym", post(api_onion_newnym))
         .route("/api/onion/exit_ip", get(api_onion_exit_ip))
         .route("/api/onion/fetch", post(api_onion_fetch))
+        .route("/api/onion/relays", post(api_onion_relays))
             .with_state(state);
 
         println!("caprun 10-tab OpsDeck ({xdp_mode} | wire_sniffer={sniffer_ok}) -> http://localhost:{port}");
@@ -837,6 +838,43 @@ async fn api_onion_fetch(State(st): State<Arc<SharedState>>, Json(r): Json<Onion
         .unwrap_or_else(|e| Err(format!("Join error: {e}")));
     match res {
         Ok(val) => Json(serde_json::to_value(val).unwrap_or_default()),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+struct OnionRelaySearchReq {
+    country: Option<String>,
+    query: Option<String>,
+    min_mbps: Option<f64>,
+    limit: Option<usize>,
+    via_tor: Option<bool>,
+}
+
+async fn api_onion_relays(
+    State(st): State<Arc<SharedState>>,
+    Json(r): Json<OnionRelaySearchReq>,
+) -> Json<serde_json::Value> {
+    let onion = st.onion.clone();
+    let country = r.country.unwrap_or_default();
+    let query = r.query.unwrap_or_default();
+    let min_mbps = r.min_mbps.unwrap_or(0.0).max(0.0);
+    let limit = r.limit.unwrap_or(30);
+    let via_tor = r.via_tor.unwrap_or(false);
+
+    let res = tokio::task::spawn_blocking(move || {
+        onion.search_exit_relays(&country, &query, min_mbps, limit, via_tor)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Join error: {e}")));
+
+    match res {
+        Ok((source, relays)) => Json(serde_json::json!({
+            "ok": true,
+            "source": source,
+            "count": relays.len(),
+            "relays": relays
+        })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }
